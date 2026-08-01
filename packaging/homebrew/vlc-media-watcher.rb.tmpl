@@ -1,0 +1,31 @@
+class VlcMediaWatcher < Formula
+  desc "Local, safe-by-default VLC watch tracking with a terminal UI"
+  homepage "https://github.com/Cyberlane/vlc-media-watcher"
+  url "https://github.com/Cyberlane/vlc-media-watcher/archive/refs/tags/__TAG__.tar.gz"
+  sha256 "__SHA256__"
+  license "MIT"
+
+  depends_on "go" => :build
+
+  def install
+    ldflags = %w[
+      -s -w
+      -X main.version=__VERSION__
+      -X main.commit=__TAG__
+      -X main.date=unknown
+      -X main.builtBy=homebrew
+    ]
+    system "go", "build", *std_go_args(ldflags: ldflags.join(" ")), "./cmd/vlc-media-watcher"
+  end
+
+  service do
+    run [opt_bin/"vlc-media-watcher", "watch"]
+    keep_alive true
+    log_path var/"log/vlc-media-watcher.log"
+    error_log_path var/"log/vlc-media-watcher.log"
+  end
+
+  test do
+    assert_match "vlc-media-watcher __VERSION__", shell_output("#{bin}/vlc-media-watcher version")
+  end
+end

@@ -1,0 +1,50 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy -diff
+
+builds:
+  - id: vlc-media-watcher
+    main: ./cmd/vlc-media-watcher
+    binary: vlc-media-watcher
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X main.version={{ .Version }}
+        -X main.commit={{ .Commit }}
+        -X main.date={{ .CommitDate }}
+        -X main.builtBy=goreleaser
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - SECURITY.md
+      - SUPPORT.md
+      - THIRD_PARTY_NOTICES.md
+      - third_party_licenses/**
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+    disable: false
+
+release:
+  prerelease: auto

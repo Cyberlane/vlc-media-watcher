@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go fmt ./...
+      - run: git diff --exit-code
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go build ./cmd/vlc-media-watcher
+
+  vulnerability-scan:
+    name: Go vulnerability scan (all target OSes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Scan reachable code for every release OS
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          audit_bin="$(go env GOPATH)/bin/govulncheck"
+          for target_os in darwin linux windows; do
+            GOOS="$target_os" "$audit_bin" ./...
+          done
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Scan repository history
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          "$(go env GOPATH)/bin/gitleaks" git --no-banner --redact --exit-code 1

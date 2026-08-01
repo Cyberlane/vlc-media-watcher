@@ -1,0 +1,22 @@
+# Local configuration and state
+config.toml
+*.db
+*.db-shm
+*.db-wal
+
+# Build output
+/vlc-media-watcher
+dist/
+bin/
+coverage.out
+
+# Local service logs
+*.log
+
+# Editor and OS files
+.DS_Store
+*.swp
+
+# A global ignore rule may hide this dependency's license directory.
+!third_party_licenses/modernc.org/memory/
+!third_party_licenses/modernc.org/memory/**
