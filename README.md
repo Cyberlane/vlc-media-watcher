@@ -27,7 +27,7 @@ Download the archive for your platform from [GitHub Releases](https://github.com
 
 ### Build with Go
 
-Go 1.26 or newer is required:
+Go 1.26.5 or newer is the supported source-build toolchain:
 
 ```sh
 go install github.com/Cyberlane/vlc-media-watcher/cmd/vlc-media-watcher@latest
