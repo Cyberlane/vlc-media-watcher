@@ -9,7 +9,6 @@ class VlcMediaWatcher < Formula
 
   def install
     ldflags = %w[
-      -s -w
       -X main.version=__VERSION__
       -X main.commit=__TAG__
       -X main.date=unknown
@@ -20,6 +19,7 @@ class VlcMediaWatcher < Formula
 
   service do
     run [opt_bin/"vlc-media-watcher", "watch"]
+    environment_variables PATH: std_service_path_env
     keep_alive true
     log_path var/"log/vlc-media-watcher.log"
     error_log_path var/"log/vlc-media-watcher.log"

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -483,6 +484,34 @@ func TestWatchServiceLoggerSuppressesRepeatedWarningsAndReportsRecovery(t *testi
 	}
 	if media := logger.media(`C:\\Private\\Shows\\Example.S01E01.mkv`); media != "Example.S01E01.mkv" {
 		t.Fatalf("redacted media = %q", media)
+	}
+}
+
+func TestSecureContinuousOutputProtectsRegularLogFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX permission bits")
+	}
+	logPath := filepath.Join(t.TempDir(), "watcher.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	if err := os.Chmod(logPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureContinuousOutput(logFile); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("log mode = %o, want 600", got)
+	}
+	if err := secureContinuousOutput(&bytes.Buffer{}); err != nil {
+		t.Fatalf("non-file output: %v", err)
 	}
 }
 

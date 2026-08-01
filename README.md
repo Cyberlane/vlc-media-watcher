@@ -81,7 +81,7 @@ Stop it before troubleshooting interactively:
 brew services stop vlc-media-watcher
 ```
 
-Only one continuous watcher may own a database at a time. Service logs use UTC timestamps, redact directory paths by default, suppress repeated identical warnings, and are written to:
+Only one continuous watcher may own a database at a time. Service logs use UTC timestamps, redact directory paths by default, suppress repeated identical warnings, repair regular log files to owner-only mode (`0600`), and are written to:
 
 ```sh
 $(brew --prefix)/var/log/vlc-media-watcher.log

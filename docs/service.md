@@ -13,9 +13,9 @@ brew services restart vlc-media-watcher
 brew services stop vlc-media-watcher
 ```
 
-Do not use `sudo`. A user service needs access to that user's configuration and credential vault.
+Do not use `sudo`. A user service needs access to that user's configuration and credential vault. The formula supplies Homebrew's standard service `PATH` so Homebrew-installed helpers such as the 1Password CLI can be resolved.
 
-Homebrew starts `vlc-media-watcher watch`, keeps it alive, and records both output streams in `$(brew --prefix)/var/log/vlc-media-watcher.log`. The watcher handles interrupt and termination signals, releases its database lease, and exits cleanly.
+Homebrew starts `vlc-media-watcher watch`, keeps it alive, and records both output streams in `$(brew --prefix)/var/log/vlc-media-watcher.log`. The watcher repairs a regular service log to owner-only mode (`0600`), handles interrupt and termination signals, releases its database lease, and exits cleanly.
 
 ## Service behavior
 

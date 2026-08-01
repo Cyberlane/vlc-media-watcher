@@ -9,7 +9,7 @@
 
 ## The keyring is unavailable
 
-Run commands as the same desktop user that owns the credentials. Linux services need a usable Secret Service session; a system-level unit commonly lacks it. As a deliberate automation fallback, choose an environment-variable secret source and expose that variable only to the user service.
+Run commands as the same desktop user that owns the credentials. Homebrew services can find helpers installed under the Homebrew prefix; helpers installed elsewhere need an explicit service environment. Linux services also need a usable Secret Service session, which a system-level unit commonly lacks. As a deliberate automation fallback, choose an environment-variable secret source and expose that variable only to the user service.
 
 ## A file remains unmatched
 

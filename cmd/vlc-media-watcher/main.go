@@ -165,6 +165,11 @@ func runWatchContext(ctx context.Context, args []string, stdout io.Writer) error
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if !*once {
+		if err := secureContinuousOutput(stdout); err != nil {
+			return err
+		}
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -311,6 +316,24 @@ func runWatchContext(ctx context.Context, args []string, stdout io.Writer) error
 		case <-ticker.C:
 		}
 	}
+}
+
+func secureContinuousOutput(writer io.Writer) error {
+	file, ok := writer.(*os.File)
+	if !ok {
+		return nil
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect continuous watcher output: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("secure continuous watcher output: %w", err)
+	}
+	return nil
 }
 
 type watchServiceLogger struct {

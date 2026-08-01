@@ -26,6 +26,19 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: go build ./cmd/vlc-media-watcher
+      - name: Validate Homebrew formula
+        if: runner.os == 'macOS'
+        run: |
+          formula_root="$(mktemp -d)"
+          mkdir -p "$formula_root/Formula"
+          ./scripts/render-homebrew-formula.sh \
+            v0.1.0 \
+            0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+            "$formula_root/Formula/vlc-media-watcher.rb"
+          ruby -c "$formula_root/Formula/vlc-media-watcher.rb"
+          grep -F "environment_variables PATH: std_service_path_env" \
+            "$formula_root/Formula/vlc-media-watcher.rb"
+          brew style "$formula_root/Formula/vlc-media-watcher.rb"
 
   vulnerability-scan:
     name: Go vulnerability scan (all target OSes)
