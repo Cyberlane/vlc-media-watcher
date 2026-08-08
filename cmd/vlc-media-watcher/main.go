@@ -260,7 +260,8 @@ func runWatchContextWithDependencies(ctx context.Context, args []string, stdout 
 		}
 	}
 	mediaManagers.SetSonarrFilenameCache(db)
-	password, err := resolveVLCCredential(ctx, cfg.VLC, *once, serviceLogger, leaseErrors, dependencies)
+	effectiveCredentials := cfg.EffectiveCredentialBindings()
+	password, err := resolveVLCCredential(ctx, effectiveCredentials.VLC, *once, serviceLogger, leaseErrors, dependencies)
 	if err != nil {
 		if !*once && errors.Is(err, context.Canceled) {
 			serviceLogger.info(time.Now(), "Watcher stopped.")
@@ -1102,7 +1103,8 @@ func reconcileEvent(db *store.Store, cfg *config.Config, mediaManagers *reconcil
 	if cfg != nil {
 		syncCtx, cancelSync := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancelSync()
-		job, syncErr := tracker.SyncAniListEvent(syncCtx, cfg.Trackers["anilist"], db, event)
+		effectiveCredentials := cfg.EffectiveCredentialBindings()
+		job, syncErr := tracker.SyncAniListEvent(syncCtx, effectiveCredentials.Trackers["anilist"], db, event)
 		if syncErr != nil {
 			outcome.Messages = append(outcome.Messages, "AniList sync was not completed; inspect Tracking.")
 		} else if job.Status != "" {

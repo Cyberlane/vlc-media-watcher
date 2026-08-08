@@ -237,7 +237,7 @@ func TestValidateMediaManagerOnlyWhenEnabled(t *testing.T) {
 			configure: func(cfg *MediaManagerConfig) {
 				cfg.SecretSource = "file"
 			},
-			wantError: "sonarr.secret_source must be environment, keyring, or 1password",
+			wantError: "sonarr.secret_source must be default, environment, keyring, or 1password",
 		},
 		{
 			name: "local prefix requires remote prefix",
@@ -393,6 +393,40 @@ func TestCredentialRegistryNormalizesExistingFieldsWithoutMutatingConfig(t *test
 	myAnimeList, ok := registry.Entry(credentials.TrackerAccessTokenID("myanimelist"))
 	if !ok || myAnimeList.Requirement.Kind != credentials.RenewableToken || myAnimeList.Requirement.Ownership != credentials.AppWritten {
 		t.Fatalf("MyAnimeList access-token registry entry = %#v", myAnimeList)
+	}
+}
+
+func TestDefaultCredentialBindingResolvesWithoutRewritingItsOverride(t *testing.T) {
+	cfg := validConfiguration()
+	cfg.Credentials.DefaultProvider = DefaultProvider1Password
+	cfg.VLC.SecretSource = ProviderDefault
+	cfg.VLC.SecretReference = "op://Private/VLC/password"
+
+	if err := Validate(cfg); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := cfg.CredentialRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := registry.Entry(credentials.VLCPasswordID)
+	if !ok || entry.Binding.Provider != credentials.Provider1Password {
+		t.Fatalf("effective VLC binding = %#v", entry)
+	}
+	if cfg.VLC.SecretSource != ProviderDefault {
+		t.Fatalf("registry rewrote explicit default binding to %q", cfg.VLC.SecretSource)
+	}
+	if effective := cfg.EffectiveCredentialBindings(); effective.VLC.SecretSource != DefaultProvider1Password {
+		t.Fatalf("effective VLC source = %q", effective.VLC.SecretSource)
+	}
+}
+
+func TestOnePasswordBindingsRequireAnExplicitReference(t *testing.T) {
+	cfg := validConfiguration()
+	cfg.VLC.SecretSource = "1password"
+	cfg.VLC.SecretReference = "vlc-password"
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "explicit op:// reference") {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }
 

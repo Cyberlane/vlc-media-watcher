@@ -17,14 +17,28 @@ import (
 const appDirectory = "vlc-media-watcher"
 
 type Config struct {
-	Profile  string                   `toml:"profile"`
-	VLC      VLCConfig                `toml:"vlc"`
-	Sonarr   MediaManagerConfig       `toml:"sonarr"`
-	Radarr   MediaManagerConfig       `toml:"radarr"`
-	Trackers map[string]TrackerConfig `toml:"trackers"`
-	Watch    WatchConfig              `toml:"watch"`
-	Storage  StorageConfig            `toml:"storage"`
+	Profile     string                   `toml:"profile"`
+	Credentials CredentialsConfig        `toml:"credentials"`
+	VLC         VLCConfig                `toml:"vlc"`
+	Sonarr      MediaManagerConfig       `toml:"sonarr"`
+	Radarr      MediaManagerConfig       `toml:"radarr"`
+	Trackers    map[string]TrackerConfig `toml:"trackers"`
+	Watch       WatchConfig              `toml:"watch"`
+	Storage     StorageConfig            `toml:"storage"`
 }
+
+// CredentialsConfig owns the provider selected when a user explicitly binds
+// an individual credential to the global default. Existing source fields
+// remain explicit compatibility bindings and are never rewritten on load.
+type CredentialsConfig struct {
+	DefaultProvider string `toml:"default_provider"`
+}
+
+const (
+	DefaultProviderKeychain  = "keyring"
+	DefaultProvider1Password = "1password"
+	ProviderDefault          = "default"
+)
 
 type VLCConfig struct {
 	Endpoint        string `toml:"endpoint"`
@@ -88,23 +102,24 @@ type StorageConfig struct {
 // compatibility slice must not copy values, migrate providers, or rewrite a
 // user's configuration file.
 func (c Config) CredentialRegistry() (credentials.Registry, error) {
+	effective := c.EffectiveCredentialBindings()
 	entries := []credentials.Entry{
 		{
 			Requirement: credentials.Requirement{ID: credentials.VLCPasswordID, Label: "VLC password", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored, Required: true},
-			Binding:     credentialBinding(c.VLC.SecretSource, c.VLC.SecretReference, c.VLC.PasswordEnv),
+			Binding:     credentialBinding(effective.VLC.SecretSource, effective.VLC.SecretReference, effective.VLC.PasswordEnv),
 		},
 		{
 			Requirement: credentials.Requirement{ID: credentials.SonarrAPIKeyID, Label: "Sonarr API key", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored},
-			Binding:     credentialBinding(c.Sonarr.SecretSource, c.Sonarr.SecretReference, c.Sonarr.APIKeyEnv),
+			Binding:     credentialBinding(effective.Sonarr.SecretSource, effective.Sonarr.SecretReference, effective.Sonarr.APIKeyEnv),
 		},
 		{
 			Requirement: credentials.Requirement{ID: credentials.RadarrAPIKeyID, Label: "Radarr API key", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored},
-			Binding:     credentialBinding(c.Radarr.SecretSource, c.Radarr.SecretReference, c.Radarr.APIKeyEnv),
+			Binding:     credentialBinding(effective.Radarr.SecretSource, effective.Radarr.SecretReference, effective.Radarr.APIKeyEnv),
 		},
 	}
 
 	for _, name := range []string{"anilist", "myanimelist", "trakt", "simkl"} {
-		tracker := c.Trackers[name]
+		tracker := effective.Trackers[name]
 		entries = append(entries, credentials.Entry{
 			Requirement: credentials.Requirement{ID: credentials.TrackerAccessTokenID(name), Label: trackerLabel(name) + " access token", Kind: trackerAccessTokenKind(name), Ownership: credentials.AppWritten},
 			Binding:     credentialBinding(tracker.SecretSource, tracker.SecretReference, tracker.AccessTokenEnv),
@@ -118,6 +133,49 @@ func (c Config) CredentialRegistry() (credentials.Registry, error) {
 	}
 
 	return credentials.NewRegistry(entries...)
+}
+
+// DefaultCredentialProvider returns the selected interactive provider. An
+// empty value is the legacy-safe Keychain default so manually constructed
+// configurations preserve historical behavior.
+func (c Config) DefaultCredentialProvider() string {
+	return EffectiveCredentialProvider(ProviderDefault, c.Credentials.DefaultProvider)
+}
+
+// EffectiveCredentialProvider resolves the special default binding without
+// modifying persisted configuration. Environment remains a compatibility
+// binding only and is intentionally not eligible as a global onboarding
+// default.
+func EffectiveCredentialProvider(source, defaultProvider string) string {
+	if strings.TrimSpace(source) != ProviderDefault {
+		return strings.TrimSpace(source)
+	}
+	switch strings.TrimSpace(defaultProvider) {
+	case DefaultProvider1Password:
+		return DefaultProvider1Password
+	default:
+		return DefaultProviderKeychain
+	}
+}
+
+// EffectiveCredentialBindings returns a copy whose explicit default bindings
+// are resolved to the configured provider. It is for runtime consumers only;
+// callers must continue saving the original configuration to preserve the
+// user's default-versus-override choice.
+func (c Config) EffectiveCredentialBindings() Config {
+	effective := c
+	effective.VLC.SecretSource = EffectiveCredentialProvider(c.VLC.SecretSource, c.Credentials.DefaultProvider)
+	effective.Sonarr.SecretSource = EffectiveCredentialProvider(c.Sonarr.SecretSource, c.Credentials.DefaultProvider)
+	effective.Radarr.SecretSource = EffectiveCredentialProvider(c.Radarr.SecretSource, c.Credentials.DefaultProvider)
+	if c.Trackers != nil {
+		effective.Trackers = make(map[string]TrackerConfig, len(c.Trackers))
+		for name, trackerConfig := range c.Trackers {
+			trackerConfig.SecretSource = EffectiveCredentialProvider(trackerConfig.SecretSource, c.Credentials.DefaultProvider)
+			trackerConfig.ClientSecretSource = EffectiveCredentialProvider(trackerConfig.ClientSecretSource, c.Credentials.DefaultProvider)
+			effective.Trackers[name] = trackerConfig
+		}
+	}
+	return effective
 }
 
 func trackerAccessTokenKind(name string) credentials.Kind {
@@ -182,6 +240,9 @@ func Load(path string) (*Config, error) {
 	}
 	migrateLegacyMediaManager(&cfg.Sonarr, metadata.IsDefined("sonarr", "unmonitor_after_watch"))
 	migrateLegacyMediaManager(&cfg.Radarr, metadata.IsDefined("radarr", "unmonitor_after_watch"))
+	if cfg.Credentials.DefaultProvider == "" {
+		cfg.Credentials.DefaultProvider = DefaultProviderKeychain
+	}
 	if cfg.VLC.SecretSource == "" {
 		cfg.VLC.SecretSource = "environment"
 	}
@@ -257,28 +318,35 @@ func Validate(cfg *Config) error {
 	if cfg.Profile == "" {
 		return fmt.Errorf("profile is required")
 	}
-	if cfg.VLC.Endpoint == "" {
+	if cfg.Credentials.DefaultProvider != "" && cfg.Credentials.DefaultProvider != DefaultProviderKeychain && cfg.Credentials.DefaultProvider != DefaultProvider1Password {
+		return fmt.Errorf("credentials.default_provider must be keyring or 1password")
+	}
+	effective := cfg.EffectiveCredentialBindings()
+	if effective.VLC.Endpoint == "" {
 		return fmt.Errorf("vlc.endpoint is required")
 	}
-	switch cfg.VLC.SecretSource {
+	switch effective.VLC.SecretSource {
 	case "environment":
-		if cfg.VLC.PasswordEnv == "" {
+		if effective.VLC.PasswordEnv == "" {
 			return fmt.Errorf("vlc.password_env is required for the environment secret source")
 		}
 	case "keyring", "1password":
-		if cfg.VLC.SecretReference == "" {
-			return fmt.Errorf("vlc.secret_reference is required for the %s secret source", cfg.VLC.SecretSource)
+		if effective.VLC.SecretReference == "" {
+			return fmt.Errorf("vlc.secret_reference is required for the %s secret source", effective.VLC.SecretSource)
+		}
+		if effective.VLC.SecretSource == "1password" && !strings.HasPrefix(effective.VLC.SecretReference, "op://") {
+			return fmt.Errorf("vlc.secret_reference must be an explicit op:// reference for the 1password secret source")
 		}
 	default:
-		return fmt.Errorf("vlc.secret_source must be environment, keyring, or 1password")
+		return fmt.Errorf("vlc.secret_source must be default, environment, keyring, or 1password")
 	}
-	if err := validateMediaManager("sonarr", cfg.Sonarr); err != nil {
+	if err := validateMediaManager("sonarr", effective.Sonarr); err != nil {
 		return err
 	}
-	if err := validateMediaManager("radarr", cfg.Radarr); err != nil {
+	if err := validateMediaManager("radarr", effective.Radarr); err != nil {
 		return err
 	}
-	for name, tracker := range cfg.Trackers {
+	for name, tracker := range effective.Trackers {
 		if err := validateTracker(name, tracker); err != nil {
 			return err
 		}
@@ -328,8 +396,11 @@ func validateTracker(name string, tracker TrackerConfig) error {
 		if strings.TrimSpace(tracker.SecretReference) == "" {
 			return fmt.Errorf("trackers.%s.secret_reference is required for the %s secret source", name, tracker.SecretSource)
 		}
+		if tracker.SecretSource == "1password" && !strings.HasPrefix(strings.TrimSpace(tracker.SecretReference), "op://") {
+			return fmt.Errorf("trackers.%s.secret_reference must be an explicit op:// reference for the 1password secret source", name)
+		}
 	default:
-		return fmt.Errorf("trackers.%s.secret_source must be environment, keyring, or 1password", name)
+		return fmt.Errorf("trackers.%s.secret_source must be default, environment, keyring, or 1password", name)
 	}
 	if name == "anilist" || name == "trakt" {
 		switch tracker.ClientSecretSource {
@@ -341,8 +412,11 @@ func validateTracker(name string, tracker TrackerConfig) error {
 			if strings.TrimSpace(tracker.ClientSecretReference) == "" {
 				return fmt.Errorf("trackers.%s.client_secret_reference is required for the %s secret source", name, tracker.ClientSecretSource)
 			}
+			if tracker.ClientSecretSource == "1password" && !strings.HasPrefix(strings.TrimSpace(tracker.ClientSecretReference), "op://") {
+				return fmt.Errorf("trackers.%s.client_secret_reference must be an explicit op:// reference for the 1password secret source", name)
+			}
 		default:
-			return fmt.Errorf("trackers.%s.client_secret_source must be environment, keyring, or 1password", name)
+			return fmt.Errorf("trackers.%s.client_secret_source must be default, environment, keyring, or 1password", name)
 		}
 	}
 	return nil
@@ -376,8 +450,11 @@ func validateMediaManager(name string, cfg MediaManagerConfig) error {
 		if strings.TrimSpace(cfg.SecretReference) == "" {
 			return fmt.Errorf("%s.secret_reference is required for the %s secret source", name, cfg.SecretSource)
 		}
+		if cfg.SecretSource == "1password" && !strings.HasPrefix(strings.TrimSpace(cfg.SecretReference), "op://") {
+			return fmt.Errorf("%s.secret_reference must be an explicit op:// reference for the 1password secret source", name)
+		}
 	default:
-		return fmt.Errorf("%s.secret_source must be environment, keyring, or 1password", name)
+		return fmt.Errorf("%s.secret_source must be default, environment, keyring, or 1password", name)
 	}
 
 	hasLocalPathPrefix := strings.TrimSpace(cfg.LocalPathPrefix) != ""
@@ -391,6 +468,7 @@ func validateMediaManager(name string, cfg MediaManagerConfig) error {
 
 func Save(path string, cfg *Config) error {
 	if cfg != nil {
+		cfg.Credentials.DefaultProvider = cfg.DefaultCredentialProvider()
 		applyTrackerDefaults(cfg)
 	}
 	if err := Validate(cfg); err != nil {
@@ -401,6 +479,9 @@ func Save(path string, cfg *Config) error {
 	}
 	content := fmt.Sprintf(`# VLC Media Watcher configuration. Managed by the terminal UI.
 profile = %s
+
+[credentials]
+default_provider = %s
 
 [vlc]
 endpoint = %s
@@ -483,7 +564,7 @@ poll_interval = %s
 
 [storage]
 path = %s
-`, quote(cfg.Profile), quote(cfg.VLC.Endpoint), quote(cfg.VLC.SecretSource), quote(cfg.VLC.SecretReference), quote(cfg.VLC.PasswordEnv),
+`, quote(cfg.Profile), quote(cfg.DefaultCredentialProvider()), quote(cfg.VLC.Endpoint), quote(cfg.VLC.SecretSource), quote(cfg.VLC.SecretReference), quote(cfg.VLC.PasswordEnv),
 		cfg.Sonarr.UnmonitoringEnabled(), cfg.Sonarr.MetadataLookup, quote(cfg.Sonarr.Endpoint), quote(cfg.Sonarr.SecretSource), quote(cfg.Sonarr.SecretReference), quote(cfg.Sonarr.APIKeyEnv), quote(cfg.Sonarr.LocalPathPrefix), quote(cfg.Sonarr.RemotePathPrefix),
 		cfg.Radarr.UnmonitoringEnabled(), cfg.Radarr.MetadataLookup, quote(cfg.Radarr.Endpoint), quote(cfg.Radarr.SecretSource), quote(cfg.Radarr.SecretReference), quote(cfg.Radarr.APIKeyEnv), quote(cfg.Radarr.LocalPathPrefix), quote(cfg.Radarr.RemotePathPrefix),
 		trackerForSave(cfg, "anilist").Enabled, trackerForSave(cfg, "anilist").SyncProgress, quote(trackerForSave(cfg, "anilist").ClientID), quote(trackerForSave(cfg, "anilist").ClientSecretSource), quote(trackerForSave(cfg, "anilist").ClientSecretReference), quote(trackerForSave(cfg, "anilist").ClientSecretEnv), quote(trackerForSave(cfg, "anilist").SecretSource), quote(trackerForSave(cfg, "anilist").SecretReference), quote(trackerForSave(cfg, "anilist").AccessTokenEnv),

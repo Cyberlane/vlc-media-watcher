@@ -101,6 +101,25 @@ func ResolveVLC(ctx context.Context, cfg config.VLCConfig) credentials.Resolutio
 	)
 }
 
+// ResolveCredential reads one stable credential binding from a full
+// configuration. It is used by foreground setup and repair flows so they can
+// test exactly the same provider-neutral binding a new watcher process will
+// use, without exposing its locator or value.
+func ResolveCredential(ctx context.Context, cfg *config.Config, id credentials.ID) credentials.Resolution {
+	if cfg == nil {
+		return failed(credentials.StateNotConfigured, "Credential configuration is not available.", errors.New("credential configuration is nil"))
+	}
+	registry, err := cfg.CredentialRegistry()
+	if err != nil {
+		return failed(credentials.StateCredentialInvalid, "Credential configuration is invalid.", err)
+	}
+	entry, ok := registry.Entry(id)
+	if !ok {
+		return failed(credentials.StateNotConfigured, "Credential is not configured.", fmt.Errorf("credential %q is not registered", id))
+	}
+	return NewResolver(Dependencies{}).Resolve(ctx, entry.Requirement, entry.Binding)
+}
+
 // ResolveMediaManager resolves a Sonarr or Radarr API key through its stable
 // provider-neutral credential ID.
 func ResolveMediaManager(ctx context.Context, manager string, cfg config.MediaManagerConfig) credentials.Resolution {

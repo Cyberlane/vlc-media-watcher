@@ -12,6 +12,7 @@ import (
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/arr"
 	"github.com/Cyberlane/vlc-media-watcher/internal/config"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 	"github.com/Cyberlane/vlc-media-watcher/internal/store"
 	"github.com/Cyberlane/vlc-media-watcher/internal/tracker"
 	"github.com/Cyberlane/vlc-media-watcher/internal/watch"
@@ -385,6 +386,90 @@ func TestSecretSourceUsesSelectorAndAdaptsTheLabels(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("1Password settings do not contain %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestDefaultProviderAndExplicitOverrideRebindWithoutCopyingAValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := testConfig(t)
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	m := New(path, cfg)
+	m.view = settingsView
+
+	m.selected, m.input, m.editing = settingIndex(t, m, credentialDefaultProviderSetting), config.DefaultProvider1Password, true
+	m.applySetting()
+	if m.config.Credentials.DefaultProvider != config.DefaultProvider1Password {
+		t.Fatalf("default provider = %q", m.config.Credentials.DefaultProvider)
+	}
+
+	m.selected, m.input, m.editing = settingIndex(t, m, vlcSecretSourceSetting), config.ProviderDefault, true
+	m.applySetting()
+	if m.config.VLC.SecretSource != config.ProviderDefault || !strings.HasPrefix(m.config.VLC.SecretReference, "op://REPLACE-ME/") {
+		t.Fatalf("1Password default binding = %#v", m.config.VLC)
+	}
+
+	m.selected, m.input, m.editing = settingIndex(t, m, vlcSecretReferenceSetting), "op://Private/VLC/password", true
+	m.applySetting()
+	if m.config.VLC.SecretReference != "op://Private/VLC/password" {
+		t.Fatalf("explicit 1Password reference = %q", m.config.VLC.SecretReference)
+	}
+
+	m.selected, m.input, m.editing = settingIndex(t, m, credentialDefaultProviderSetting), config.DefaultProviderKeychain, true
+	m.applySetting()
+	if m.config.VLC.SecretSource != config.ProviderDefault || m.config.VLC.SecretReference != "default/vlc-password" {
+		t.Fatalf("keychain default rebind = %#v", m.config.VLC)
+	}
+	loaded, err := config.Load(path)
+	if err != nil || loaded.Credentials.DefaultProvider != config.DefaultProviderKeychain || loaded.VLC.SecretSource != config.ProviderDefault || loaded.VLC.SecretReference != "default/vlc-password" {
+		t.Fatalf("saved default/override = %#v, err=%v", loaded, err)
+	}
+}
+
+func TestCredentialTestAndKeychainEntryKeepTheSecretHidden(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := testConfig(t)
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	m := New(path, cfg)
+	m.view = settingsView
+	m.selected, m.input, m.editing = settingIndex(t, m, vlcSecretSourceSetting), "keyring", true
+	m.applySetting()
+	m.selected = settingIndex(t, m, vlcSecretReferenceSetting)
+
+	m.testCredential = func(_ context.Context, _ *config.Config, id credentials.ID) credentials.Resolution {
+		if id != credentials.VLCPasswordID {
+			t.Fatalf("tested credential = %q", id)
+		}
+		return credentials.Resolution{State: credentials.StateReady, Value: "not-for-display", SafeMessage: "Ready"}
+	}
+	_, command := m.updateKey(keyMsg("t"))
+	if !m.credentialTesting || command == nil {
+		t.Fatalf("credential test state testing:%t command:%t", m.credentialTesting, command != nil)
+	}
+	_, _ = m.Update(command())
+	if m.credentialTesting || !strings.Contains(m.message, "ready") || strings.Contains(m.message, "not-for-display") {
+		t.Fatalf("credential test message = %q", m.message)
+	}
+
+	storedReference, storedValue := "", ""
+	m.storeSecret = func(reference, value string) error {
+		storedReference, storedValue = reference, value
+		return nil
+	}
+	_, _ = m.updateKey(keyMsg("K"))
+	if !m.secretInput || !m.editing {
+		t.Fatalf("keychain input state secretInput:%t editing:%t", m.secretInput, m.editing)
+	}
+	_, _ = m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("test-secret-value")})
+	if rendered := m.View(); strings.Contains(rendered, "test-secret-value") {
+		t.Fatalf("secret leaked into TUI:\n%s", rendered)
+	}
+	_, _ = m.updateKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if storedReference != "default/vlc-password" || storedValue != "test-secret-value" || strings.Contains(m.message, storedValue) {
+		t.Fatalf("keychain store reference=%q value=%q message=%q", storedReference, storedValue, m.message)
 	}
 }
 

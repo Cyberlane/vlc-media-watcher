@@ -15,6 +15,7 @@ import (
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/arr"
 	"github.com/Cyberlane/vlc-media-watcher/internal/config"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 	"github.com/Cyberlane/vlc-media-watcher/internal/reconcile"
 	"github.com/Cyberlane/vlc-media-watcher/internal/secrets"
 	"github.com/Cyberlane/vlc-media-watcher/internal/store"
@@ -70,31 +71,32 @@ const (
 type settingID string
 
 const (
-	profileSetting            settingID = "profile"
-	vlcEndpointSetting        settingID = "vlc.endpoint"
-	vlcSecretSourceSetting    settingID = "vlc.secret_source"
-	vlcSecretReferenceSetting settingID = "vlc.secret_reference"
-	vlcPasswordEnvSetting     settingID = "vlc.password_env"
-	episodeThresholdSetting   settingID = "watch.episode_threshold"
-	movieThresholdSetting     settingID = "watch.movie_threshold"
-	pollIntervalSetting       settingID = "watch.poll_interval"
-	databasePathSetting       settingID = "storage.path"
-	sonarrUnmonitorSetting    settingID = "sonarr.unmonitor_after_watch"
-	sonarrMetadataSetting     settingID = "sonarr.metadata_lookup"
-	sonarrEndpointSetting     settingID = "sonarr.endpoint"
-	sonarrSecretSourceSetting settingID = "sonarr.secret_source"
-	sonarrSecretRefSetting    settingID = "sonarr.secret_reference"
-	sonarrAPIKeyEnvSetting    settingID = "sonarr.api_key_env"
-	sonarrLocalPrefixSetting  settingID = "sonarr.local_path_prefix"
-	sonarrRemotePrefixSetting settingID = "sonarr.remote_path_prefix"
-	radarrUnmonitorSetting    settingID = "radarr.unmonitor_after_watch"
-	radarrMetadataSetting     settingID = "radarr.metadata_lookup"
-	radarrEndpointSetting     settingID = "radarr.endpoint"
-	radarrSecretSourceSetting settingID = "radarr.secret_source"
-	radarrSecretRefSetting    settingID = "radarr.secret_reference"
-	radarrAPIKeyEnvSetting    settingID = "radarr.api_key_env"
-	radarrLocalPrefixSetting  settingID = "radarr.local_path_prefix"
-	radarrRemotePrefixSetting settingID = "radarr.remote_path_prefix"
+	profileSetting                   settingID = "profile"
+	credentialDefaultProviderSetting settingID = "credentials.default_provider"
+	vlcEndpointSetting               settingID = "vlc.endpoint"
+	vlcSecretSourceSetting           settingID = "vlc.secret_source"
+	vlcSecretReferenceSetting        settingID = "vlc.secret_reference"
+	vlcPasswordEnvSetting            settingID = "vlc.password_env"
+	episodeThresholdSetting          settingID = "watch.episode_threshold"
+	movieThresholdSetting            settingID = "watch.movie_threshold"
+	pollIntervalSetting              settingID = "watch.poll_interval"
+	databasePathSetting              settingID = "storage.path"
+	sonarrUnmonitorSetting           settingID = "sonarr.unmonitor_after_watch"
+	sonarrMetadataSetting            settingID = "sonarr.metadata_lookup"
+	sonarrEndpointSetting            settingID = "sonarr.endpoint"
+	sonarrSecretSourceSetting        settingID = "sonarr.secret_source"
+	sonarrSecretRefSetting           settingID = "sonarr.secret_reference"
+	sonarrAPIKeyEnvSetting           settingID = "sonarr.api_key_env"
+	sonarrLocalPrefixSetting         settingID = "sonarr.local_path_prefix"
+	sonarrRemotePrefixSetting        settingID = "sonarr.remote_path_prefix"
+	radarrUnmonitorSetting           settingID = "radarr.unmonitor_after_watch"
+	radarrMetadataSetting            settingID = "radarr.metadata_lookup"
+	radarrEndpointSetting            settingID = "radarr.endpoint"
+	radarrSecretSourceSetting        settingID = "radarr.secret_source"
+	radarrSecretRefSetting           settingID = "radarr.secret_reference"
+	radarrAPIKeyEnvSetting           settingID = "radarr.api_key_env"
+	radarrLocalPrefixSetting         settingID = "radarr.local_path_prefix"
+	radarrRemotePrefixSetting        settingID = "radarr.remote_path_prefix"
 )
 
 type Model struct {
@@ -150,6 +152,11 @@ type Model struct {
 	openURL                func(string) error
 	linking                bool
 	link                   trackerLinkFunc
+	credentialTesting      bool
+	testCredential         credentialTestFunc
+	storeSecret            func(string, string) error
+	secretInput            bool
+	secretInputCredential  credentials.ID
 }
 
 type messageTone uint8
@@ -189,6 +196,13 @@ type trackerLinkResultMsg struct {
 	err     error
 }
 
+type credentialTestFunc func(context.Context, *config.Config, credentials.ID) credentials.Resolution
+
+type credentialTestResultMsg struct {
+	id         credentials.ID
+	resolution credentials.Resolution
+}
+
 type trackingRetryResultMsg struct {
 	attempted int
 	resolved  int
@@ -223,7 +237,7 @@ func Run(configPath string, input io.Reader, output io.Writer) error {
 }
 
 func New(configPath string, cfg *config.Config) *Model {
-	m := &Model{configPath: configPath, config: cfg, width: 80, height: 24, validate: reconcile.Test, search: tracker.Search, openURL: tracker.OpenBrowser, link: tracker.Link, managerMessages: make(map[string]messageState), mappings: make(map[int64][]store.TrackerMapping), integrationChecks: make(map[string]store.IntegrationCheck), syncJobs: make(map[string]store.TrackerSyncJob)}
+	m := &Model{configPath: configPath, config: cfg, width: 80, height: 24, validate: reconcile.Test, search: tracker.Search, openURL: tracker.OpenBrowser, link: tracker.Link, testCredential: secrets.ResolveCredential, storeSecret: secrets.StoreInKeyring, managerMessages: make(map[string]messageState), mappings: make(map[int64][]store.TrackerMapping), integrationChecks: make(map[string]store.IntegrationCheck), syncJobs: make(map[string]store.TrackerSyncJob)}
 	if definitions := tracker.All(); len(definitions) > 0 {
 		m.trackerService = definitions[0].Service
 	}
@@ -290,6 +304,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.recordIntegrationCheck(string(value.service), "linked", "✓ Linked locally")
 		m.setMessage(trackerTitle(value.service)+" account linked securely.", messageToneSuccess)
+		return m, nil
+	case credentialTestResultMsg:
+		m.credentialTesting = false
+		if value.resolution.Ready() {
+			m.setMessage(credentialLabel(value.id)+" is ready. Its value was not shown.", messageToneSuccess)
+			return m, nil
+		}
+		m.setMessage(credentialLabel(value.id)+" needs repair: "+secrets.SafeResolutionError(value.resolution).Error(), messageToneWarning)
 		return m, nil
 	case trackingRetryResultMsg:
 		m.trackingRetrying = false
@@ -481,8 +503,10 @@ func (m *Model) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.applySetting()
 			if !m.editing && isSecretSource(m.settings()[m.selected].id) {
 				m.selectSecretReference()
-				if m.input == "1password" {
-					m.setMessage("Saved. Next, enter the 1Password item shown below.", messageToneSuccess)
+				if config.EffectiveCredentialProvider(m.input, m.config.Credentials.DefaultProvider) == "1password" {
+					m.setMessage("Saved. Next, enter the explicit 1Password item reference shown below; no value was copied.", messageToneSuccess)
+				} else if config.EffectiveCredentialProvider(m.input, m.config.Credentials.DefaultProvider) == "keyring" {
+					m.setMessage("Saved. The keychain rebind uses a predictable app item; press K to store a value or T to test it.", messageToneSuccess)
 				}
 			}
 		}
@@ -494,8 +518,14 @@ func (m *Model) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case tea.KeyEsc:
 			m.editing = false
 			m.editingSearch = false
+			m.secretInput = false
+			m.secretInputCredential = ""
 			m.setMessage("Edit cancelled.", messageToneNeutral)
 		case tea.KeyEnter:
+			if m.secretInput {
+				m.storeKeychainSecret()
+				return m, nil
+			}
 			if m.view == matchesView {
 				if m.editingSearch {
 					m.editing = false
@@ -580,7 +610,21 @@ func (m *Model) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.view == matchesView {
 			m.reloadMediaUnits()
 		}
+	case "t":
+		if m.isEditableView() {
+			return m, m.testSelectedCredential()
+		}
+	case "K":
+		if m.isEditableView() {
+			m.beginKeychainSetup()
+			return m, nil
+		}
 	case "r":
+		if m.isEditableView() && m.selected >= 0 && m.selected < len(m.settings()) && isSecretSource(m.settings()[m.selected].id) {
+			m.beginSelection(m.settings()[m.selected])
+			m.setMessage("Rebinding is explicit: choose a provider. No credential value will be copied or moved.", messageToneNeutral)
+			return m, nil
+		}
 		m.reloadEvents()
 		m.reloadMediaUnits()
 	case "R":
@@ -771,7 +815,7 @@ func (m *Model) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) beginSelection(item setting) {
 	m.editing = true
 	m.selecting = true
-	m.selectionOptions = selectionOptions(item)
+	m.selectionOptions = m.selectionOptionsFor(item)
 	m.selectionTitle = "Choose " + item.name
 	m.choice = optionIndex(m.selectionOptions, item.value)
 	m.setMessage("Choose an action; Enter applies it and Esc cancels.", messageToneNeutral)
@@ -849,8 +893,10 @@ type choiceOption struct {
 	custom       bool
 }
 
-func secretSourceChoices() []choiceOption {
+func secretSourceChoices(defaultProvider string) []choiceOption {
+	defaultLabel := "Use global default (" + providerLabel(defaultProvider) + ")"
 	return []choiceOption{
+		{config.ProviderDefault, defaultLabel, false},
 		{"keyring", "This computer's secure keychain (recommended)", false},
 		{"1password", "1Password", false},
 		{"environment", "Environment variable (advanced)", false},
@@ -920,14 +966,19 @@ func pollIntervalOptions() []choiceOption {
 // selectionOptions centralizes every finite-value picker. Text entry is kept
 // for user-owned values only: paths, custom URLs, secret references, and OAuth
 // application identifiers.
-func selectionOptions(item setting) []choiceOption {
+func (m *Model) selectionOptionsFor(item setting) []choiceOption {
 	if isSecretSource(item.id) {
-		return secretSourceChoices()
+		return secretSourceChoices(m.config.DefaultCredentialProvider())
 	}
 	var options []choiceOption
 	switch item.id {
 	case profileSetting:
 		options = profileOptions()
+	case credentialDefaultProviderSetting:
+		options = []choiceOption{
+			{config.DefaultProviderKeychain, "This computer's secure keychain", false},
+			{config.DefaultProvider1Password, "1Password", false},
+		}
 	case vlcEndpointSetting:
 		options = vlcEndpointOptions()
 	case sonarrEndpointSetting:
@@ -942,6 +993,24 @@ func selectionOptions(item setting) []choiceOption {
 		return textValueOptions(item)
 	}
 	return keepCurrentOption(options, item.value)
+}
+
+func providerLabel(provider string) string {
+	switch provider {
+	case config.DefaultProvider1Password:
+		return "1Password"
+	case "environment":
+		return "Environment variable"
+	default:
+		return "Keychain"
+	}
+}
+
+func providerBindingLabel(source string, defaultProvider string) string {
+	if source == config.ProviderDefault {
+		return "Use global default (" + providerLabel(defaultProvider) + ")"
+	}
+	return providerLabel(source)
 }
 
 func isSecretSource(id settingID) bool {
@@ -983,7 +1052,7 @@ func (m *Model) toggleSetting(item setting) {
 
 func (m *Model) selectSecretReference() {
 	var target settingID
-	source := m.input
+	source := config.EffectiveCredentialProvider(m.input, m.config.Credentials.DefaultProvider)
 	switch m.settings()[m.selected].id {
 	case vlcSecretSourceSetting:
 		target = secretValueSettingID(source, vlcSecretReferenceSetting, vlcPasswordEnvSetting)
@@ -1018,13 +1087,6 @@ func secretValueSettingID(source string, referenceID, environmentID settingID) s
 	return referenceID
 }
 
-func secretValueSetting(source string, referenceID settingID, referenceValue, referenceService string, environmentID settingID, environmentValue, environmentExample, environmentLabel string) setting {
-	if source == "environment" {
-		return setting{environmentID, environmentLabel, environmentValue, environmentHint(source, environmentExample)}
-	}
-	return setting{referenceID, secretReferenceLabel(source), referenceValue, secretReferenceHint(referenceService, source)}
-}
-
 func (m *Model) settings() []setting {
 	switch m.view {
 	case trackersView:
@@ -1046,8 +1108,8 @@ func (m *Model) settings() []setting {
 		}
 		settings := []setting{
 			{settingID(prefix + ".client_id"), "Application client ID", trackerConfig.ClientID, clientIDHint},
-			{settingID(prefix + ".client_secret_source"), "Client secret location", trackerConfig.ClientSecretSource, "Needed by AniList and Trakt; choose secure keychain, 1Password, or an environment variable"},
-			secretValueSetting(trackerConfig.ClientSecretSource, settingID(prefix+".client_secret_reference"), trackerConfig.ClientSecretReference, definition.Name+" client secret", settingID(prefix+".client_secret_env"), trackerConfig.ClientSecretEnv, "VLC_MEDIA_WATCHER_"+strings.ToUpper(string(definition.Service))+"_CLIENT_SECRET", "Client secret variable"),
+			{settingID(prefix + ".client_secret_source"), "Client secret location", trackerConfig.ClientSecretSource, "Use the global default or explicitly override it with Keychain, 1Password, or an environment variable"},
+			m.secretValueSetting(trackerConfig.ClientSecretSource, settingID(prefix+".client_secret_reference"), trackerConfig.ClientSecretReference, definition.Name+" client secret", settingID(prefix+".client_secret_env"), trackerConfig.ClientSecretEnv, "VLC_MEDIA_WATCHER_"+strings.ToUpper(string(definition.Service))+"_CLIENT_SECRET", "Client secret variable"),
 			{settingID(prefix + ".enabled"), "Link tracker", formatToggle(trackerConfig.Enabled), "Enter or Space toggles it after the application client ID is configured"},
 		}
 		if definition.Service == tracker.AniList {
@@ -1059,36 +1121,45 @@ func (m *Model) settings() []setting {
 			{sonarrMetadataSetting, "Use for tracker metadata", formatToggle(m.config.Sonarr.MetadataLookup), "Read exact file metadata to create tracker-match entries; never writes to Sonarr"},
 			{sonarrUnmonitorSetting, "Unmonitor after watch", formatToggle(m.config.Sonarr.UnmonitoringEnabled()), "Enter or Space toggles it. On stops future grabs/upgrades for matched episodes"},
 			{sonarrEndpointSetting, "Endpoint", m.config.Sonarr.Endpoint, "Choose the local default or enter a custom base URL; do not add /api/v3"},
-			{sonarrSecretSourceSetting, "API key location", m.config.Sonarr.SecretSource, "Choose secure keychain, 1Password, or an environment variable"},
+			{sonarrSecretSourceSetting, "API key location", m.config.Sonarr.SecretSource, "Use the global default or explicitly override it with Keychain, 1Password, or an environment variable"},
 			{sonarrLocalPrefixSetting, "VLC's TV folder", m.config.Sonarr.LocalPathPrefix, "Leave blank unless VLC sees the files in a different folder, e.g. /Volumes/Media/TV"},
 			{sonarrRemotePrefixSetting, "Sonarr's TV folder", m.config.Sonarr.RemotePathPrefix, "Leave blank unless Sonarr calls that same folder something else, e.g. /tv"},
 		}
-		credential := secretValueSetting(m.config.Sonarr.SecretSource, sonarrSecretRefSetting, m.config.Sonarr.SecretReference, "Sonarr", sonarrAPIKeyEnvSetting, m.config.Sonarr.APIKeyEnv, "SONARR_API_KEY", "API-key variable")
+		credential := m.secretValueSetting(m.config.Sonarr.SecretSource, sonarrSecretRefSetting, m.config.Sonarr.SecretReference, "Sonarr", sonarrAPIKeyEnvSetting, m.config.Sonarr.APIKeyEnv, "SONARR_API_KEY", "API-key variable")
 		return append(settings[:4], append([]setting{credential}, settings[4:]...)...)
 	case radarrView:
 		settings := []setting{
 			{radarrMetadataSetting, "Use for tracker metadata", formatToggle(m.config.Radarr.MetadataLookup), "Read exact file metadata to create tracker-match entries; never writes to Radarr"},
 			{radarrUnmonitorSetting, "Unmonitor after watch", formatToggle(m.config.Radarr.UnmonitoringEnabled()), "Enter or Space toggles it. On stops future grabs/upgrades for matched movies"},
 			{radarrEndpointSetting, "Endpoint", m.config.Radarr.Endpoint, "Choose the local default or enter a custom base URL; do not add /api/v3"},
-			{radarrSecretSourceSetting, "API key location", m.config.Radarr.SecretSource, "Choose secure keychain, 1Password, or an environment variable"},
+			{radarrSecretSourceSetting, "API key location", m.config.Radarr.SecretSource, "Use the global default or explicitly override it with Keychain, 1Password, or an environment variable"},
 			{radarrLocalPrefixSetting, "VLC's movie folder", m.config.Radarr.LocalPathPrefix, "Leave blank unless VLC sees the files in a different folder, e.g. /Volumes/Media/Movies"},
 			{radarrRemotePrefixSetting, "Radarr's movie folder", m.config.Radarr.RemotePathPrefix, "Leave blank unless Radarr calls that same folder something else, e.g. /movies"},
 		}
-		credential := secretValueSetting(m.config.Radarr.SecretSource, radarrSecretRefSetting, m.config.Radarr.SecretReference, "Radarr", radarrAPIKeyEnvSetting, m.config.Radarr.APIKeyEnv, "RADARR_API_KEY", "API-key variable")
+		credential := m.secretValueSetting(m.config.Radarr.SecretSource, radarrSecretRefSetting, m.config.Radarr.SecretReference, "Radarr", radarrAPIKeyEnvSetting, m.config.Radarr.APIKeyEnv, "RADARR_API_KEY", "API-key variable")
 		return append(settings[:4], append([]setting{credential}, settings[4:]...)...)
 	default:
 		settings := []setting{
 			{profileSetting, "Profile", m.config.Profile, "Choose the default profile or enter a custom local name"},
+			{credentialDefaultProviderSetting, "Default credential provider", m.config.Credentials.DefaultProvider, "Used only when a credential is explicitly rebound to Use global default; changing it never copies a secret"},
 			{vlcEndpointSetting, "VLC endpoint", m.config.VLC.Endpoint, "Choose a common local endpoint or enter a custom URL"},
-			{vlcSecretSourceSetting, "Password location", m.config.VLC.SecretSource, "Choose secure keychain, 1Password, or an environment variable"},
+			{vlcSecretSourceSetting, "Password location", m.config.VLC.SecretSource, "Use the global default or explicitly override it with Keychain, 1Password, or an environment variable"},
 			{episodeThresholdSetting, "Episode threshold", percent(m.config.Watch.EpisodeThreshold), "Choose the percentage watched before recording an episode"},
 			{movieThresholdSetting, "Movie threshold", percent(m.config.Watch.MovieThreshold), "Choose the percentage watched before recording a movie"},
 			{pollIntervalSetting, "Poll interval", m.config.Watch.PollInterval.String(), "Choose how often VLC is checked"},
 			{databasePathSetting, "Database path", m.config.Storage.Path, "Blank uses the operating-system default"},
 		}
-		credential := secretValueSetting(m.config.VLC.SecretSource, vlcSecretReferenceSetting, m.config.VLC.SecretReference, "VLC", vlcPasswordEnvSetting, m.config.VLC.PasswordEnv, "VLC_PASSWORD", "Password variable")
-		return append(settings[:3], append([]setting{credential}, settings[3:]...)...)
+		credential := m.secretValueSetting(m.config.VLC.SecretSource, vlcSecretReferenceSetting, m.config.VLC.SecretReference, "VLC", vlcPasswordEnvSetting, m.config.VLC.PasswordEnv, "VLC_PASSWORD", "Password variable")
+		return append(settings[:4], append([]setting{credential}, settings[4:]...)...)
 	}
+}
+
+func (m *Model) secretValueSetting(source string, referenceID settingID, referenceValue, referenceService string, environmentID settingID, environmentValue, environmentExample, environmentLabel string) setting {
+	effectiveSource := config.EffectiveCredentialProvider(source, m.config.Credentials.DefaultProvider)
+	if effectiveSource == "environment" {
+		return setting{environmentID, environmentLabel, environmentValue, environmentHint(effectiveSource, environmentExample)}
+	}
+	return setting{referenceID, secretReferenceLabel(effectiveSource), referenceValue, secretReferenceHint(referenceService, effectiveSource)}
 }
 
 func secretReferenceLabel(source string) string {
@@ -1101,9 +1172,9 @@ func secretReferenceLabel(source string) string {
 func secretReferenceHint(service, source string) string {
 	switch source {
 	case "1password":
-		return fmt.Sprintf("Example: op://Private/%s/password", service)
+		return fmt.Sprintf("Example: op://Private/%s/password. Use an explicit op:// reference; T tests it", service)
 	default:
-		return fmt.Sprintf("Leave this name as-is, then run: vlc-media-watcher secret set %s", strings.ToLower(service))
+		return fmt.Sprintf("Press K to store a new value in the predictable app keychain item, or T to test this binding")
 	}
 }
 
@@ -1127,13 +1198,7 @@ func formatToggle(value bool) string {
 
 func (m *Model) applySetting() {
 	value := strings.TrimSpace(m.input)
-	candidate := *m.config
-	if m.config.Trackers != nil {
-		candidate.Trackers = make(map[string]config.TrackerConfig, len(m.config.Trackers))
-		for name, trackerConfig := range m.config.Trackers {
-			candidate.Trackers[name] = trackerConfig
-		}
-	}
+	candidate := cloneConfig(m.config)
 	var err error
 	settings := m.settings()
 	if m.selected < 0 || m.selected >= len(settings) {
@@ -1178,6 +1243,8 @@ func (m *Model) applySetting() {
 		switch currentSetting {
 		case profileSetting:
 			candidate.Profile = value
+		case credentialDefaultProviderSetting:
+			candidate.Credentials.DefaultProvider = value
 		case vlcEndpointSetting:
 			candidate.VLC.Endpoint = value
 		case vlcSecretSourceSetting:
@@ -1233,6 +1300,9 @@ func (m *Model) applySetting() {
 		}
 	}
 	if err == nil {
+		err = prepareCredentialBinding(&candidate, currentSetting)
+	}
+	if err == nil {
 		err = config.Save(m.configPath, &candidate)
 	}
 	if err != nil {
@@ -1250,6 +1320,279 @@ func (m *Model) applySetting() {
 	m.setMessage("Saved. New watcher processes will use this setting.", messageToneSuccess)
 	m.reloadEvents()
 	m.reloadMediaUnits()
+}
+
+func prepareCredentialBinding(candidate *config.Config, current settingID) error {
+	if candidate == nil {
+		return fmt.Errorf("credential configuration is required")
+	}
+	if current == credentialDefaultProviderSetting {
+		return prepareDefaultCredentialBindings(candidate)
+	}
+	id, ok := credentialIDForSettingID(current)
+	if !ok {
+		return nil
+	}
+	registry, err := candidate.CredentialRegistry()
+	if err != nil {
+		return err
+	}
+	entry, found := registry.Entry(id)
+	if !found {
+		return fmt.Errorf("credential binding is unavailable")
+	}
+	if isSecretSource(current) && entry.Requirement.Ownership == credentials.UserStored {
+		switch entry.Binding.Provider {
+		case credentials.ProviderKeychain:
+			return setCredentialReference(candidate, id, predictableKeychainReference(candidate.Profile, id))
+		case credentials.Provider1Password:
+			if !strings.HasPrefix(entry.Binding.Locator, "op://") {
+				return setCredentialReference(candidate, id, "op://REPLACE-ME/"+strings.ReplaceAll(string(id), ".", "-"))
+			}
+		}
+	}
+	if isSecretReferenceSetting(current) && entry.Binding.Provider == credentials.Provider1Password && !strings.HasPrefix(entry.Binding.Locator, "op://") {
+		return fmt.Errorf("enter an explicit op:// reference for the 1Password binding")
+	}
+	return nil
+}
+
+func prepareDefaultCredentialBindings(candidate *config.Config) error {
+	bindings := []struct {
+		id     credentials.ID
+		source string
+	}{
+		{credentials.VLCPasswordID, candidate.VLC.SecretSource},
+		{credentials.SonarrAPIKeyID, candidate.Sonarr.SecretSource},
+		{credentials.RadarrAPIKeyID, candidate.Radarr.SecretSource},
+	}
+	for name, trackerConfig := range candidate.Trackers {
+		bindings = append(bindings, struct {
+			id     credentials.ID
+			source string
+		}{credentials.TrackerClientSecretID(name), trackerConfig.ClientSecretSource})
+	}
+	for _, binding := range bindings {
+		if binding.source != config.ProviderDefault {
+			continue
+		}
+		registry, err := candidate.CredentialRegistry()
+		if err != nil {
+			return err
+		}
+		entry, found := registry.Entry(binding.id)
+		if !found || entry.Requirement.Ownership != credentials.UserStored {
+			continue
+		}
+		switch entry.Binding.Provider {
+		case credentials.ProviderKeychain:
+			if err := setCredentialReference(candidate, binding.id, predictableKeychainReference(candidate.Profile, binding.id)); err != nil {
+				return err
+			}
+		case credentials.Provider1Password:
+			if !strings.HasPrefix(entry.Binding.Locator, "op://") {
+				if err := setCredentialReference(candidate, binding.id, "op://REPLACE-ME/"+strings.ReplaceAll(string(binding.id), ".", "-")); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func isSecretReferenceSetting(id settingID) bool {
+	if id == vlcSecretReferenceSetting || id == sonarrSecretRefSetting || id == radarrSecretRefSetting {
+		return true
+	}
+	return strings.HasPrefix(string(id), "trackers.") && (strings.HasSuffix(string(id), ".secret_reference") || strings.HasSuffix(string(id), ".client_secret_reference"))
+}
+
+func cloneConfig(source *config.Config) config.Config {
+	if source == nil {
+		return config.Config{}
+	}
+	copy := *source
+	if source.Trackers != nil {
+		copy.Trackers = make(map[string]config.TrackerConfig, len(source.Trackers))
+		for name, trackerConfig := range source.Trackers {
+			copy.Trackers[name] = trackerConfig
+		}
+	}
+	return copy
+}
+
+func (m *Model) selectedCredentialID() (credentials.ID, bool) {
+	settings := m.settings()
+	if m.selected < 0 || m.selected >= len(settings) {
+		return "", false
+	}
+	return credentialIDForSettingID(settings[m.selected].id)
+}
+
+func credentialIDForSettingID(setting settingID) (credentials.ID, bool) {
+	switch setting {
+	case vlcSecretSourceSetting, vlcSecretReferenceSetting, vlcPasswordEnvSetting:
+		return credentials.VLCPasswordID, true
+	case sonarrSecretSourceSetting, sonarrSecretRefSetting, sonarrAPIKeyEnvSetting:
+		return credentials.SonarrAPIKeyID, true
+	case radarrSecretSourceSetting, radarrSecretRefSetting, radarrAPIKeyEnvSetting:
+		return credentials.RadarrAPIKeyID, true
+	}
+	name, field, ok := splitTrackerSetting(setting)
+	if !ok {
+		return "", false
+	}
+	if strings.HasPrefix(field, "client_secret") {
+		return credentials.TrackerClientSecretID(name), true
+	}
+	if field == "secret_source" || field == "secret_reference" || field == "access_token_env" {
+		return credentials.TrackerAccessTokenID(name), true
+	}
+	return "", false
+}
+
+func credentialLabel(id credentials.ID) string {
+	switch id {
+	case credentials.VLCPasswordID:
+		return "VLC password"
+	case credentials.SonarrAPIKeyID:
+		return "Sonarr API key"
+	case credentials.RadarrAPIKeyID:
+		return "Radarr API key"
+	}
+	name := strings.TrimPrefix(string(id), "tracker.")
+	parts := strings.Split(name, ".")
+	if len(parts) < 2 {
+		return "Credential"
+	}
+	return trackerTitle(tracker.Service(parts[0])) + " " + strings.ReplaceAll(parts[1], "-", " ")
+}
+
+func (m *Model) testSelectedCredential() tea.Cmd {
+	id, ok := m.selectedCredentialID()
+	if !ok {
+		m.setMessage("Select a credential location or reference before testing it.", messageToneWarning)
+		return nil
+	}
+	if m.credentialTesting {
+		return nil
+	}
+	m.credentialTesting = true
+	m.setMessage("Testing "+credentialLabel(id)+" without showing its value…", messageToneNeutral)
+	cfg := cloneConfig(m.config)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), secrets.ForegroundResolveTimeout)
+		defer cancel()
+		return credentialTestResultMsg{id: id, resolution: m.testCredential(ctx, &cfg, id)}
+	}
+}
+
+func predictableKeychainReference(profile string, id credentials.ID) string {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		profile = "default"
+	}
+	return profile + "/" + strings.ReplaceAll(string(id), ".", "-")
+}
+
+func setCredentialReference(cfg *config.Config, id credentials.ID, reference string) error {
+	if cfg == nil || strings.TrimSpace(reference) == "" {
+		return fmt.Errorf("credential reference is required")
+	}
+	switch id {
+	case credentials.VLCPasswordID:
+		cfg.VLC.SecretReference = reference
+	case credentials.SonarrAPIKeyID:
+		cfg.Sonarr.SecretReference = reference
+	case credentials.RadarrAPIKeyID:
+		cfg.Radarr.SecretReference = reference
+	default:
+		name, clientSecret, ok := trackerCredentialReferenceTarget(id)
+		if !ok {
+			return fmt.Errorf("unknown credential binding")
+		}
+		trackerConfig := cfg.Trackers[name]
+		if clientSecret {
+			trackerConfig.ClientSecretReference = reference
+		} else {
+			trackerConfig.SecretReference = reference
+		}
+		if cfg.Trackers == nil {
+			cfg.Trackers = make(map[string]config.TrackerConfig)
+		}
+		cfg.Trackers[name] = trackerConfig
+	}
+	return nil
+}
+
+func trackerCredentialReferenceTarget(id credentials.ID) (name string, clientSecret bool, ok bool) {
+	parts := strings.Split(string(id), ".")
+	if len(parts) != 3 || parts[0] != "tracker" {
+		return "", false, false
+	}
+	switch parts[2] {
+	case "client-secret":
+		return parts[1], true, true
+	case "access-token":
+		return parts[1], false, true
+	default:
+		return "", false, false
+	}
+}
+
+func (m *Model) beginKeychainSetup() {
+	id, ok := m.selectedCredentialID()
+	if !ok {
+		m.setMessage("Select a credential location or reference before setting a Keychain value.", messageToneWarning)
+		return
+	}
+	registry, err := m.config.CredentialRegistry()
+	if err != nil {
+		m.setMessage("Could not prepare Keychain setup: "+err.Error(), messageToneWarning)
+		return
+	}
+	entry, found := registry.Entry(id)
+	if !found || entry.Binding.Provider != credentials.ProviderKeychain {
+		m.setMessage("Keychain setup is available only for a credential bound to Keychain.", messageToneWarning)
+		return
+	}
+	if entry.Requirement.Ownership != credentials.UserStored {
+		m.setMessage("This app-owned credential is written only by its account-link flow.", messageToneWarning)
+		return
+	}
+	m.editing = true
+	m.secretInput = true
+	m.secretInputCredential = id
+	m.input = ""
+	m.setMessage("Enter a new Keychain value. It is hidden and will not be saved in configuration, logs, or the database.", messageToneNeutral)
+}
+
+func (m *Model) storeKeychainSecret() {
+	value := m.input
+	id := m.secretInputCredential
+	m.input = ""
+	m.secretInput = false
+	m.secretInputCredential = ""
+	m.editing = false
+	if strings.TrimSpace(value) == "" {
+		m.setMessage("Keychain value was not stored: it is empty.", messageToneWarning)
+		return
+	}
+	registry, err := m.config.CredentialRegistry()
+	if err != nil {
+		m.setMessage("Keychain value was not stored: credential configuration is invalid.", messageToneWarning)
+		return
+	}
+	entry, found := registry.Entry(id)
+	if !found || entry.Binding.Provider != credentials.ProviderKeychain || entry.Requirement.Ownership != credentials.UserStored {
+		m.setMessage("Keychain value was not stored: the selected binding changed.", messageToneWarning)
+		return
+	}
+	if err := m.storeSecret(entry.Binding.Locator, value); err != nil {
+		m.setMessage("Keychain value was not stored. Repair Keychain access, then try again.", messageToneWarning)
+		return
+	}
+	m.setMessage(credentialLabel(id)+" was stored in the app Keychain item. The value was not shown.", messageToneSuccess)
 }
 
 func splitTrackerSetting(id settingID) (name, field string, ok bool) {
@@ -1508,7 +1851,8 @@ func (m *Model) syncSelectedAniList(event watch.Event) tea.Cmd {
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		job, err := tracker.SyncAniListEventWithProgress(ctx, cfg.Trackers["anilist"], db, event, report)
+		effectiveCredentials := cfg.EffectiveCredentialBindings()
+		job, err := tracker.SyncAniListEventWithProgress(ctx, effectiveCredentials.Trackers["anilist"], db, event, report)
 		cancel()
 		if err != nil {
 			updates <- trackingSyncResultMsg{job: job, err: err}
@@ -1794,7 +2138,8 @@ func (m *Model) linkTracker(service tracker.Service, trackerConfig config.Tracke
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
-		result, err := m.link(ctx, service, trackerConfig, tracker.OpenBrowser)
+		effectiveCredentials := m.config.EffectiveCredentialBindings()
+		result, err := m.link(ctx, service, effectiveCredentials.Trackers[string(service)], tracker.OpenBrowser)
 		return trackerLinkResultMsg{service: service, result: result, err: err}
 	}
 }
@@ -1855,7 +2200,8 @@ func (m *Model) queueAniListCatchUp(unit store.MediaUnit, service tracker.Servic
 		result := mappingSyncResultMsg{attempted: len(events)}
 		for _, event := range events {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			job, syncErr := tracker.SyncAniListEvent(ctx, cfg.Trackers["anilist"], db, event)
+			effectiveCredentials := cfg.EffectiveCredentialBindings()
+			job, syncErr := tracker.SyncAniListEvent(ctx, effectiveCredentials.Trackers["anilist"], db, event)
 			cancel()
 			if syncErr != nil {
 				result.err = syncErr
@@ -1957,6 +2303,12 @@ func (m *Model) View() string {
 		}
 		b.WriteString(mutedStyle.Render("↑/↓ choose   Enter apply   Esc cancel") + "\n")
 	} else if m.editing {
+		if m.secretInput {
+			b.WriteString(sectionStyle.Render("Enter Keychain value") + "\n")
+			b.WriteString(selectedRowStyle.Render("  ••••••••") + "\n")
+			b.WriteString(mutedStyle.Render("Value hidden   Enter store   Esc cancel") + "\n")
+			return b.String()
+		}
 		label := "Enter custom value"
 		if m.view == matchesView {
 			if m.editingSearch {
@@ -2369,7 +2721,7 @@ func (m *Model) findMediaUnitForEvent(event watch.Event) (store.MediaUnit, bool)
 
 func (m *Model) renderSettings(b *strings.Builder) {
 	b.WriteString(sectionStyle.Render("Settings") + "  " + mutedStyle.Render("durable local preferences; secret values are never shown") + "\n")
-	b.WriteString(mutedStyle.Render("Library and tracker connections have their own tabs. Changes save locally when confirmed.") + "\n\n")
+	b.WriteString(mutedStyle.Render("Library and tracker connections have their own tabs. T tests a selected binding; R rebinds it; K stores a Keychain value without showing it.") + "\n\n")
 	m.renderSettingRows(b)
 	b.WriteString("\n" + hintStyle.Render("Advanced diagnostic: "+m.configPath) + "\n")
 }
@@ -2649,6 +3001,11 @@ func (m *Model) renderSettingRows(b *strings.Builder) {
 			b.WriteString(sectionStyle.Render(section) + "\n")
 		}
 		value := item.value
+		if isSecretSource(item.id) {
+			value = providerBindingLabel(value, m.config.DefaultCredentialProvider())
+		} else if item.id == credentialDefaultProviderSetting {
+			value = providerLabel(value)
+		}
 		if item.id == databasePathSetting && value == "" {
 			value = "(default: " + m.config.DatabasePath() + ")"
 		}
@@ -2668,7 +3025,11 @@ func (m *Model) renderSettingRows(b *strings.Builder) {
 			b.WriteString(labelStyle.Render(" "+fmt.Sprintf("%-23s", item.name+":")) + valueStyleForRow.Render(value) + "\n")
 		}
 		if index == m.selected {
-			b.WriteString(hintStyle.Render("    ↳ "+truncate(item.hint, max(12, m.width-8))) + "\n")
+			if m.secretInput {
+				b.WriteString(hintStyle.Render("    ↳ Keychain value: •••••••• (hidden; Enter stores, Esc cancels)") + "\n")
+			} else {
+				b.WriteString(hintStyle.Render("    ↳ "+truncate(item.hint, max(12, m.width-8))) + "\n")
+			}
 		}
 	}
 }
@@ -2680,12 +3041,14 @@ func (m *Model) settingSection(index int) string {
 		case 0:
 			return "General"
 		case 1:
+			return "Credential defaults"
+		case 2:
 			return "VLC connection"
-		case 3:
+		case 5:
 			return "Privacy and storage"
-		case 4:
+		case 6:
 			return "Completion rules"
-		case 7:
+		case 8:
 			return "Advanced"
 		}
 	case sonarrView, radarrView:
