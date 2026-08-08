@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/arr"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 	"github.com/Cyberlane/vlc-media-watcher/internal/watch"
 )
 
@@ -131,6 +132,46 @@ func TestRecordEventIsIdempotent(t *testing.T) {
 	}
 	if events[0].Status != "unmonitored" {
 		t.Fatalf("status = %q", events[0].Status)
+	}
+}
+
+func TestCredentialIncidentsPersistDeduplicationAndRecovery(t *testing.T) {
+	s := openTestStore(t)
+	openedIncident, err := credentials.NewIncident("watcher", credentials.VLCPasswordID, credentials.StateProviderUnavailable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := s.ObserveCredentialIncident(openedIncident)
+	if err != nil || opened.Kind != credentials.IncidentOpened {
+		t.Fatalf("opened incident = %#v, err=%v", opened, err)
+	}
+	duplicate, err := s.ObserveCredentialIncident(openedIncident)
+	if err != nil || !duplicate.Empty() {
+		t.Fatalf("duplicate incident = %#v, err=%v", duplicate, err)
+	}
+	changedIncident, err := credentials.NewIncident("watcher", credentials.VLCPasswordID, credentials.StateNeedsUserAction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := s.ObserveCredentialIncident(changedIncident)
+	if err != nil || changed.Kind != credentials.IncidentUpdated {
+		t.Fatalf("changed incident = %#v, err=%v", changed, err)
+	}
+	active, err := s.ActiveCredentialIncidents(10)
+	if err != nil || len(active) != 1 || active[0].Detail != changedIncident.Detail || !active[0].Active {
+		t.Fatalf("active incidents = %#v, err=%v", active, err)
+	}
+	recoveredIncident, err := credentials.NewIncident("watcher", credentials.VLCPasswordID, credentials.StateReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := s.ObserveCredentialIncident(recoveredIncident)
+	if err != nil || recovered.Kind != credentials.IncidentRecovered {
+		t.Fatalf("recovered incident = %#v, err=%v", recovered, err)
+	}
+	active, err = s.ActiveCredentialIncidents(10)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("active incidents after recovery = %#v, err=%v", active, err)
 	}
 }
 

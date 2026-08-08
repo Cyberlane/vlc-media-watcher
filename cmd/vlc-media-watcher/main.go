@@ -222,6 +222,7 @@ func runWatchContextWithDependencies(ctx context.Context, args []string, stdout 
 	defer db.Close()
 
 	serviceLogger := newWatchServiceLogger(stdout, *verbose)
+	serviceLogger.credentialIncidentStore = db
 	leaseOwner := ""
 	if !*once {
 		leaseOwner, err = newWatcherLeaseOwner()
@@ -438,11 +439,13 @@ func secureContinuousOutput(writer io.Writer) error {
 }
 
 type watchServiceLogger struct {
-	writer             io.Writer
-	verbose            bool
-	lastWarning        string
-	lastWarningAt      time.Time
-	suppressedWarnings int
+	writer                  io.Writer
+	verbose                 bool
+	lastWarning             string
+	lastWarningAt           time.Time
+	suppressedWarnings      int
+	credentialIncidentStore *store.Store
+	credentialIncidents     credentials.IncidentTracker
 }
 
 func newWatchServiceLogger(writer io.Writer, verbose bool) *watchServiceLogger {
@@ -481,14 +484,38 @@ func (l *watchServiceLogger) pollRecovered(now time.Time, pollWarning string) {
 }
 
 func (l *watchServiceLogger) credentialPaused(now time.Time, state credentials.State) {
+	if event := l.observeCredentialIncident(credentials.VLCPasswordID, state); event.Empty() {
+		return
+	}
 	l.warning(now, vlcCredentialPausedMessage(state))
 }
 
 func (l *watchServiceLogger) credentialRecovered(now time.Time) {
+	if event := l.observeCredentialIncident(credentials.VLCPasswordID, credentials.StateReady); event.Empty() {
+		return
+	}
 	l.info(now, "VLC credential repaired; resuming VLC observation.")
 	l.lastWarning = ""
 	l.lastWarningAt = time.Time{}
 	l.suppressedWarnings = 0
+}
+
+func (l *watchServiceLogger) observeCredentialIncident(id credentials.ID, state credentials.State) credentials.IncidentEvent {
+	incident, err := credentials.NewIncident("watcher", id, state)
+	if err != nil {
+		return credentials.IncidentEvent{}
+	}
+	if l.credentialIncidentStore != nil {
+		event, err := l.credentialIncidentStore.ObserveCredentialIncident(incident)
+		if err == nil {
+			return event
+		}
+	}
+	event, err := l.credentialIncidents.Observe(incident.Scope, incident.CredentialID, incident.State)
+	if err != nil {
+		return credentials.IncidentEvent{}
+	}
+	return event
 }
 
 func vlcCredentialPausedMessage(state credentials.State) string {

@@ -75,4 +75,8 @@ func TestSyncAniListEventRecordsCredentialFailureWithoutProviderMetadata(t *test
 	if err != nil || !found || stored.EventPath != job.EventPath || stored.Tracker != job.Tracker || stored.TrackerID != job.TrackerID || stored.Status != job.Status || stored.Detail != job.Detail || stored.TargetProgress != job.TargetProgress || stored.UpdatedAt.IsZero() {
 		t.Fatalf("stored job = %#v, found=%t, err=%v; want persisted %#v", stored, found, err, job)
 	}
+	incidents, err := db.ActiveCredentialIncidents(10)
+	if err != nil || len(incidents) != 1 || incidents[0].CredentialID != "tracker.anilist.access-token" || strings.Contains(incidents[0].Detail, missingEnvironment) {
+		t.Fatalf("active incidents = %#v, err=%v", incidents, err)
+	}
 }

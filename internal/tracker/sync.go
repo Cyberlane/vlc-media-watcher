@@ -75,6 +75,7 @@ func syncAniListEvent(ctx context.Context, cfg config.TrackerConfig, db *store.S
 		if err := db.UpsertTrackerSyncJob(job); err != nil {
 			return job, fmt.Errorf("record AniList credential failure: %w", err)
 		}
+		recordTrackerCredentialIncident(db, resolution.State)
 		return job, secrets.SafeResolutionError(resolution)
 	}
 	result, err := syncAniListProgress(ctx, resolution.Value, mapping.TrackerID, event.EpisodeNumbers, report)
@@ -82,11 +83,22 @@ func syncAniListEvent(ctx context.Context, cfg config.TrackerConfig, db *store.S
 	if err != nil {
 		job.Status = "failed"
 		job.Detail = "AniList progress could not be updated: " + err.Error()
+		recordTrackerCredentialIncident(db, credentials.ClassifyAPIError(err))
+	} else {
+		recordTrackerCredentialIncident(db, credentials.StateReady)
 	}
 	if saveErr := db.UpsertTrackerSyncJob(job); saveErr != nil {
 		return job, saveErr
 	}
 	return job, err
+}
+
+func recordTrackerCredentialIncident(db *store.Store, state credentials.State) {
+	incident, err := credentials.NewIncident("tracker-sync", credentials.TrackerAccessTokenID(string(AniList)), state)
+	if err != nil {
+		return
+	}
+	_, _ = db.ObserveCredentialIncident(incident)
 }
 
 func trackerCredentialFailureDetail(state credentials.State) string {

@@ -38,6 +38,17 @@ const (
 // normalized full path. Callers must not mutate any of the candidates.
 var ErrAmbiguousMatch = errors.New("ambiguous media-manager match")
 
+// HTTPStatusError retains only a status code and an already-redacted message.
+// It lets higher layers classify authentication rejection without inspecting
+// endpoint or response-body text.
+type HTTPStatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e HTTPStatusError) Error() string       { return e.Message }
+func (e HTTPStatusError) HTTPStatusCode() int { return e.StatusCode }
+
 // Instance describes the remote application returned by system/status.
 type Instance struct {
 	AppName      string
@@ -282,7 +293,7 @@ func responseError(method, apiPath string, response *http.Response, secrets ...s
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, int64(readLimit)))
 	if err != nil {
-		return fmt.Errorf("%s %s returned %s", method, apiPath, response.Status)
+		return HTTPStatusError{StatusCode: response.StatusCode, Message: fmt.Sprintf("%s %s returned %s", method, apiPath, response.Status)}
 	}
 	detail := strings.TrimSpace(string(body))
 	for _, secret := range secrets {
@@ -295,10 +306,10 @@ func responseError(method, apiPath string, response *http.Response, secrets ...s
 		detail = detail[:maxErrorBody]
 	}
 	if detail == "" {
-		return fmt.Errorf("%s %s returned %s", method, apiPath, response.Status)
+		return HTTPStatusError{StatusCode: response.StatusCode, Message: fmt.Sprintf("%s %s returned %s", method, apiPath, response.Status)}
 	}
 	if truncated {
 		detail += "..."
 	}
-	return fmt.Errorf("%s %s returned %s: %s", method, apiPath, response.Status, detail)
+	return HTTPStatusError{StatusCode: response.StatusCode, Message: fmt.Sprintf("%s %s returned %s: %s", method, apiPath, response.Status, detail)}
 }

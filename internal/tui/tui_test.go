@@ -473,6 +473,26 @@ func TestCredentialTestAndKeychainEntryKeepTheSecretHidden(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsOnlyRedactedCredentialRepairStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := testConfig(t)
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	m := New(path, cfg)
+	m.recordCredentialIncident("watcher", credentials.VLCPasswordID, credentials.StateCredentialDenied)
+	m.view = dashboardView
+	rendered := m.View()
+	if !strings.Contains(rendered, "Credential repair") || !strings.Contains(rendered, "VLC credential access was denied") {
+		t.Fatalf("Dashboard =\n%s", rendered)
+	}
+	for _, forbidden := range []string{"op://", "VLC_MEDIA_WATCHER", "default/vlc"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("Dashboard leaked %q:\n%s", forbidden, rendered)
+		}
+	}
+}
+
 func TestFiniteSettingsUseReusableSelectionLists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := testConfig(t)

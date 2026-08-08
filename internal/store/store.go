@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/arr"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 	"github.com/Cyberlane/vlc-media-watcher/internal/mediaparse"
 	"github.com/Cyberlane/vlc-media-watcher/internal/watch"
 )
@@ -19,7 +21,7 @@ import (
 type Store struct{ db *sql.DB }
 
 const (
-	currentSchemaVersion = 2
+	currentSchemaVersion = 3
 	databaseBusyTimeout  = 5 * time.Second
 )
 
@@ -106,6 +108,8 @@ func (s *Store) migrate() error {
 			err = migrateInitialSchema(tx)
 		case 2:
 			err = migrateWatcherLease(tx)
+		case 3:
+			err = migrateCredentialIncidents(tx)
 		default:
 			err = fmt.Errorf("unknown database migration %d", next)
 		}
@@ -211,6 +215,21 @@ func migrateWatcherLease(tx *sql.Tx) error {
 	 name TEXT PRIMARY KEY,
 	 owner TEXT NOT NULL,
 	 expires_at_unix_nano INTEGER NOT NULL
+);`)
+	return err
+}
+
+func migrateCredentialIncidents(tx *sql.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS credential_incidents (
+ scope TEXT NOT NULL,
+ credential_id TEXT NOT NULL,
+ state TEXT NOT NULL,
+ detail TEXT NOT NULL,
+ active INTEGER NOT NULL,
+ first_seen TEXT NOT NULL,
+ last_seen TEXT NOT NULL,
+ recovered_at TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(scope, credential_id)
 );`)
 	return err
 }
@@ -432,6 +451,100 @@ type IntegrationCheck struct {
 	CheckedAt time.Time
 	State     string
 	Detail    string
+}
+
+// CredentialIncident is the persistent, provider-neutral status view used by
+// the TUI. It contains only stable IDs and redacted guidance.
+type CredentialIncident struct {
+	Scope        string
+	CredentialID credentials.ID
+	State        credentials.State
+	Detail       string
+	Active       bool
+	FirstSeen    time.Time
+	LastSeen     time.Time
+	RecoveredAt  time.Time
+}
+
+// ObserveCredentialIncident records only state transitions. Repeated active
+// failures remain de-duplicated across watcher restarts, while one recovery is
+// retained when a previously active incident becomes ready.
+func (s *Store) ObserveCredentialIncident(incident credentials.Incident) (credentials.IncidentEvent, error) {
+	if s == nil || strings.TrimSpace(incident.Scope) == "" || strings.TrimSpace(string(incident.CredentialID)) == "" || strings.TrimSpace(string(incident.State)) == "" || strings.TrimSpace(incident.Detail) == "" {
+		return credentials.IncidentEvent{}, fmt.Errorf("invalid credential incident")
+	}
+	var active bool
+	var state string
+	err := s.db.QueryRow(`SELECT active, state FROM credential_incidents WHERE scope=? AND credential_id=?`, incident.Scope, string(incident.CredentialID)).Scan(&active, &state)
+	found := err == nil
+	if err != nil && err != sql.ErrNoRows {
+		return credentials.IncidentEvent{}, fmt.Errorf("read credential incident: %w", err)
+	}
+	now := time.Now().UTC()
+	if incident.State == credentials.StateReady {
+		if !found || !active {
+			return credentials.IncidentEvent{}, nil
+		}
+		if _, err := s.db.Exec(`UPDATE credential_incidents SET state=?, detail=?, active=0, last_seen=?, recovered_at=? WHERE scope=? AND credential_id=?`, string(incident.State), incident.Detail, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), incident.Scope, string(incident.CredentialID)); err != nil {
+			return credentials.IncidentEvent{}, fmt.Errorf("record credential recovery: %w", err)
+		}
+		return credentials.IncidentEvent{Kind: credentials.IncidentRecovered, Incident: incident}, nil
+	}
+	if found && active && state == string(incident.State) {
+		if _, err := s.db.Exec(`UPDATE credential_incidents SET last_seen=? WHERE scope=? AND credential_id=?`, now.Format(time.RFC3339Nano), incident.Scope, string(incident.CredentialID)); err != nil {
+			return credentials.IncidentEvent{}, fmt.Errorf("refresh credential incident: %w", err)
+		}
+		return credentials.IncidentEvent{}, nil
+	}
+	if found {
+		if _, err := s.db.Exec(`UPDATE credential_incidents SET state=?, detail=?, active=1, last_seen=?, recovered_at='' WHERE scope=? AND credential_id=?`, string(incident.State), incident.Detail, now.Format(time.RFC3339Nano), incident.Scope, string(incident.CredentialID)); err != nil {
+			return credentials.IncidentEvent{}, fmt.Errorf("update credential incident: %w", err)
+		}
+		return credentials.IncidentEvent{Kind: credentials.IncidentUpdated, Incident: incident}, nil
+	}
+	if _, err := s.db.Exec(`INSERT INTO credential_incidents (scope, credential_id, state, detail, active, first_seen, last_seen, recovered_at) VALUES (?, ?, ?, ?, 1, ?, ?, '')`, incident.Scope, string(incident.CredentialID), string(incident.State), incident.Detail, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		return credentials.IncidentEvent{}, fmt.Errorf("open credential incident: %w", err)
+	}
+	return credentials.IncidentEvent{Kind: credentials.IncidentOpened, Incident: incident}, nil
+}
+
+// ActiveCredentialIncidents returns redacted incidents in most-recent-first
+// order. The result is intentionally limited so a stale provider cannot flood
+// the TUI.
+func (s *Store) ActiveCredentialIncidents(limit int) ([]CredentialIncident, error) {
+	if s == nil || limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT scope, credential_id, state, detail, active, first_seen, last_seen, recovered_at FROM credential_incidents WHERE active=1 ORDER BY last_seen DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read active credential incidents: %w", err)
+	}
+	defer rows.Close()
+	incidents := make([]CredentialIncident, 0)
+	for rows.Next() {
+		var incident CredentialIncident
+		var firstSeen, lastSeen, recoveredAt string
+		if err := rows.Scan(&incident.Scope, &incident.CredentialID, &incident.State, &incident.Detail, &incident.Active, &firstSeen, &lastSeen, &recoveredAt); err != nil {
+			return nil, fmt.Errorf("scan active credential incident: %w", err)
+		}
+		var err error
+		if incident.FirstSeen, err = time.Parse(time.RFC3339Nano, firstSeen); err != nil {
+			return nil, fmt.Errorf("parse credential incident first seen: %w", err)
+		}
+		if incident.LastSeen, err = time.Parse(time.RFC3339Nano, lastSeen); err != nil {
+			return nil, fmt.Errorf("parse credential incident last seen: %w", err)
+		}
+		if recoveredAt != "" {
+			if incident.RecoveredAt, err = time.Parse(time.RFC3339Nano, recoveredAt); err != nil {
+				return nil, fmt.Errorf("parse credential incident recovery: %w", err)
+			}
+		}
+		incidents = append(incidents, incident)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active credential incidents: %w", err)
+	}
+	return incidents, nil
 }
 
 // TrackerSyncJob records one externally visible tracker-progress outcome for

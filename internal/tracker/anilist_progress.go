@@ -153,6 +153,13 @@ type aniListError struct {
 	Message string `json:"message"`
 }
 
+type aniListHTTPStatusError struct{ statusCode int }
+
+func (e aniListHTTPStatusError) Error() string {
+	return fmt.Sprintf("AniList request returned HTTP %d", e.statusCode)
+}
+func (e aniListHTTPStatusError) HTTPStatusCode() int { return e.statusCode }
+
 func aniListRequest(ctx context.Context, token, query string, variables map[string]any, destination any) error {
 	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
@@ -175,7 +182,7 @@ func aniListRequest(ctx context.Context, token, query string, variables map[stri
 		return fmt.Errorf("read AniList response: %w", err)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("AniList request returned HTTP %d", response.StatusCode)
+		return aniListHTTPStatusError{statusCode: response.StatusCode}
 	}
 	if err := json.Unmarshal(body, destination); err != nil {
 		return fmt.Errorf("decode AniList response: %w", err)

@@ -542,6 +542,10 @@ func TestContinuousWatchKeepsItsLeaseWhenVLCCredentialNeedsRepair(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer db.Close()
+	incidents, err := db.ActiveCredentialIncidents(10)
+	if err != nil || len(incidents) != 1 || incidents[0].CredentialID != credentials.VLCPasswordID || strings.Contains(incidents[0].Detail, "op://private") {
+		t.Fatalf("active credential incidents = %#v, err=%v", incidents, err)
+	}
 	if acquired, err := db.AcquireWatcherLease(continuousWatcherLeaseName, "after-degraded-stop", time.Now(), continuousWatcherLeaseTTL); err != nil || !acquired {
 		t.Fatalf("released degraded watcher lease = %t, %v", acquired, err)
 	}
@@ -609,6 +613,14 @@ func TestContinuousWatchRecoversVLCCredentialOnceWithoutLeakingProviderMetadata(
 	logOutput := output.String()
 	if strings.Count(logOutput, "Watching is paused until the VLC credential is repaired") != 1 || !strings.Contains(logOutput, "VLC credential repaired; resuming VLC observation.") || strings.Contains(logOutput, "op://private") {
 		t.Fatalf("credential-recovery log = %q", logOutput)
+	}
+	db, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if incidents, err := db.ActiveCredentialIncidents(10); err != nil || len(incidents) != 0 {
+		t.Fatalf("active credential incidents after recovery = %#v, err=%v", incidents, err)
 	}
 }
 

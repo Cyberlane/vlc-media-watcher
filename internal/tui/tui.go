@@ -112,6 +112,7 @@ type Model struct {
 	heartbeatKnown         bool
 	integrationChecks      map[string]store.IntegrationCheck
 	syncJobs               map[string]store.TrackerSyncJob
+	credentialIncidents    []store.CredentialIncident
 	allMediaUnits          []store.MediaUnit
 	mediaUnits             []store.MediaUnit
 	mappings               map[int64][]store.TrackerMapping
@@ -307,6 +308,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case credentialTestResultMsg:
 		m.credentialTesting = false
+		m.recordCredentialIncident("tui", value.id, value.resolution.State)
 		if value.resolution.Ready() {
 			m.setMessage(credentialLabel(value.id)+" is ready. Its value was not shown.", messageToneSuccess)
 			return m, nil
@@ -368,6 +370,22 @@ func (m *Model) recordIntegrationCheck(service, state, detail string) {
 		}
 		m.integrationChecks[service] = store.IntegrationCheck{Service: service, State: state, Detail: detail, CheckedAt: time.Now().UTC()}
 	}
+}
+
+func (m *Model) recordCredentialIncident(scope string, id credentials.ID, state credentials.State) {
+	incident, err := credentials.NewIncident(scope, id, state)
+	if err != nil {
+		return
+	}
+	db, err := store.Open(m.config.DatabasePath())
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	if _, err := db.ObserveCredentialIncident(incident); err != nil {
+		return
+	}
+	m.credentialIncidents, _ = db.ActiveCredentialIncidents(8)
 }
 
 func (m *Model) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1673,6 +1691,10 @@ func (m *Model) reloadEvents() {
 	}
 	m.integrationChecks = make(map[string]store.IntegrationCheck)
 	m.syncJobs = make(map[string]store.TrackerSyncJob)
+	m.credentialIncidents, err = db.ActiveCredentialIncidents(8)
+	if err != nil {
+		m.setMessage("Could not load credential repair status.", messageToneWarning)
+	}
 	for _, event := range m.allEvents {
 		job, found, jobErr := db.TrackerSyncJob(event.MediaPath, string(tracker.AniList))
 		if jobErr != nil {
@@ -2456,6 +2478,12 @@ func (m *Model) renderDashboard(b *strings.Builder) {
 	}
 	if confirmed > 0 {
 		b.WriteString("\n" + mutedStyle.Render("Enter opens the next needed repair or mapping. r refreshes evidence.") + "\n")
+	}
+	if len(m.credentialIncidents) > 0 {
+		b.WriteString("\n" + sectionStyle.Render("Credential repair") + "\n")
+		for _, incident := range m.credentialIncidents {
+			b.WriteString(warningStyle.Render("! "+incident.Detail) + "\n")
+		}
 	}
 }
 
