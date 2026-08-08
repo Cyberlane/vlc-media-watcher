@@ -17,6 +17,7 @@ import (
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/arr"
 	"github.com/Cyberlane/vlc-media-watcher/internal/config"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 	"github.com/Cyberlane/vlc-media-watcher/internal/reconcile"
 	"github.com/Cyberlane/vlc-media-watcher/internal/store"
 	"github.com/Cyberlane/vlc-media-watcher/internal/watch"
@@ -467,6 +468,173 @@ func TestContinuousWatchIsSingleInstancePrivateAndGraceful(t *testing.T) {
 	defer db.Close()
 	if acquired, err := db.AcquireWatcherLease(continuousWatcherLeaseName, "after-stop", time.Now(), continuousWatcherLeaseTTL); err != nil || !acquired {
 		t.Fatalf("released watcher lease = %t, %v", acquired, err)
+	}
+}
+
+func TestContinuousWatchKeepsItsLeaseWhenVLCCredentialNeedsRepair(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "watcher.db")
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	cfg := &config.Config{
+		Profile: "credential-retry-test",
+		VLC: config.VLCConfig{
+			Endpoint:        "http://127.0.0.1:8080",
+			SecretSource:    "1password",
+			SecretReference: "op://private/vlc/password",
+		},
+		Watch:   config.WatchConfig{EpisodeThreshold: .9, MovieThreshold: .85, PollInterval: time.Second},
+		Storage: config.StorageConfig{Path: databasePath},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	firstAttempt := make(chan struct{})
+	dependencies := defaultWatchDependencies()
+	dependencies.credentialRetryDelays = []time.Duration{100 * time.Millisecond}
+	dependencies.resolveVLC = func(context.Context, config.VLCConfig) credentials.Resolution {
+		select {
+		case <-firstAttempt:
+		default:
+			close(firstAttempt)
+		}
+		return credentials.Resolution{State: credentials.StateProviderUnavailable, SafeMessage: "op://private/vlc/password"}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var output bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- runWatchContextWithDependencies(ctx, []string{"--config", configPath}, &output, dependencies)
+	}()
+	select {
+	case <-firstAttempt:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not attempt the VLC credential")
+	}
+
+	secondErr := runWatchContext(context.Background(), []string{"--config", configPath}, io.Discard)
+	if secondErr == nil || !strings.Contains(secondErr.Error(), "another continuous watcher") {
+		t.Fatalf("second watcher error = %v", secondErr)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("credential-degraded watcher exited early: %v", err)
+	default:
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("credential-degraded watcher stop = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("credential-degraded watcher did not stop after cancellation")
+	}
+	logOutput := output.String()
+	if !strings.Contains(logOutput, "VLC credential provider is unavailable") || !strings.Contains(logOutput, "Watching is paused until the VLC credential is repaired") || strings.Contains(logOutput, "op://private") {
+		t.Fatalf("credential-degraded log = %q", logOutput)
+	}
+
+	db, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if acquired, err := db.AcquireWatcherLease(continuousWatcherLeaseName, "after-degraded-stop", time.Now(), continuousWatcherLeaseTTL); err != nil || !acquired {
+		t.Fatalf("released degraded watcher lease = %t, %v", acquired, err)
+	}
+}
+
+func TestContinuousWatchRecoversVLCCredentialOnceWithoutLeakingProviderMetadata(t *testing.T) {
+	polled := make(chan struct{}, 1)
+	vlcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case polled <- struct{}{}:
+		default:
+		}
+		_, _ = w.Write([]byte(`{"state":"paused","position":0,"length":0}`))
+	}))
+	defer vlcServer.Close()
+
+	databasePath := filepath.Join(t.TempDir(), "watcher.db")
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	cfg := &config.Config{
+		Profile: "credential-recovery-test",
+		VLC: config.VLCConfig{
+			Endpoint:     vlcServer.URL,
+			SecretSource: "environment",
+			PasswordEnv:  "VLC_MEDIA_WATCHER_TEST_PASSWORD",
+		},
+		Watch:   config.WatchConfig{EpisodeThreshold: .9, MovieThreshold: .85, PollInterval: 10 * time.Millisecond},
+		Storage: config.StorageConfig{Path: databasePath},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int32
+	dependencies := defaultWatchDependencies()
+	dependencies.credentialRetryDelays = []time.Duration{time.Millisecond}
+	dependencies.resolveVLC = func(context.Context, config.VLCConfig) credentials.Resolution {
+		if calls.Add(1) == 1 {
+			return credentials.Resolution{State: credentials.StateNeedsUserAction, SafeMessage: "op://private/vlc/password"}
+		}
+		return credentials.Resolution{State: credentials.StateReady, Value: "test-password", SafeMessage: "Ready"}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var output bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- runWatchContextWithDependencies(ctx, []string{"--config", configPath}, &output, dependencies)
+	}()
+	select {
+	case <-polled:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("watcher did not resume polling after credential recovery")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("credential-recovered watcher stop = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("credential-recovered watcher did not stop after cancellation")
+	}
+
+	logOutput := output.String()
+	if strings.Count(logOutput, "Watching is paused until the VLC credential is repaired") != 1 || !strings.Contains(logOutput, "VLC credential repaired; resuming VLC observation.") || strings.Contains(logOutput, "op://private") {
+		t.Fatalf("credential-recovery log = %q", logOutput)
+	}
+}
+
+func TestVLCCredentialResolutionUsesTheApprovedBackgroundTimeoutAndRetrySchedule(t *testing.T) {
+	dependencies := defaultWatchDependencies()
+	remaining := make(chan time.Duration, 1)
+	dependencies.resolveVLC = func(ctx context.Context, _ config.VLCConfig) credentials.Resolution {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("credential resolver context has no deadline")
+		}
+		remaining <- time.Until(deadline)
+		return credentials.Resolution{State: credentials.StateProviderUnavailable, SafeMessage: "VLC credential provider is unavailable."}
+	}
+	logger := newWatchServiceLogger(io.Discard, false)
+	_, err := resolveVLCCredential(context.Background(), config.VLCConfig{}, true, logger, nil, dependencies)
+	if err == nil || strings.Contains(err.Error(), "op://") {
+		t.Fatalf("one-shot credential resolution error = %v", err)
+	}
+	if got := <-remaining; got > vlcCredentialResolveTimeout || got < 9*time.Second {
+		t.Fatalf("credential resolution timeout remaining = %s, want approximately %s", got, vlcCredentialResolveTimeout)
+	}
+	for attempt, want := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 5 * time.Minute} {
+		if got := vlcCredentialRetryDelay(attempt, defaultVLCCredentialRetryDelays); got != want {
+			t.Fatalf("retry delay %d = %s, want %s", attempt, got, want)
+		}
 	}
 }
 

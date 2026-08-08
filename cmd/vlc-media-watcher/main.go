@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/arr"
 	"github.com/Cyberlane/vlc-media-watcher/internal/config"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 	"github.com/Cyberlane/vlc-media-watcher/internal/reconcile"
 	"github.com/Cyberlane/vlc-media-watcher/internal/secrets"
 	"github.com/Cyberlane/vlc-media-watcher/internal/store"
@@ -154,9 +156,45 @@ const (
 	continuousWatcherLeaseTTL     = 30 * time.Second
 	continuousWatcherLeaseRenew   = 10 * time.Second
 	repeatedWarningReportInterval = 15 * time.Minute
+	vlcCredentialResolveTimeout   = 10 * time.Second
 )
 
+var defaultVLCCredentialRetryDelays = []time.Duration{
+	15 * time.Second,
+	30 * time.Second,
+	time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+}
+
+type watchDependencies struct {
+	resolveVLC             func(context.Context, config.VLCConfig) credentials.Resolution
+	credentialResolveLimit time.Duration
+	credentialRetryDelays  []time.Duration
+}
+
+func defaultWatchDependencies() watchDependencies {
+	return watchDependencies{
+		resolveVLC:             secrets.ResolveVLC,
+		credentialResolveLimit: vlcCredentialResolveTimeout,
+		credentialRetryDelays:  defaultVLCCredentialRetryDelays,
+	}
+}
+
 func runWatchContext(ctx context.Context, args []string, stdout io.Writer) error {
+	return runWatchContextWithDependencies(ctx, args, stdout, defaultWatchDependencies())
+}
+
+func runWatchContextWithDependencies(ctx context.Context, args []string, stdout io.Writer, dependencies watchDependencies) error {
+	if dependencies.resolveVLC == nil {
+		dependencies.resolveVLC = secrets.ResolveVLC
+	}
+	if dependencies.credentialResolveLimit <= 0 {
+		dependencies.credentialResolveLimit = vlcCredentialResolveTimeout
+	}
+	if len(dependencies.credentialRetryDelays) == 0 {
+		dependencies.credentialRetryDelays = defaultVLCCredentialRetryDelays
+	}
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", config.DefaultPath(), "configuration file")
@@ -206,6 +244,10 @@ func runWatchContext(ctx context.Context, args []string, stdout io.Writer) error
 		}()
 		ctx = leaseCtx
 	}
+	var leaseErrors <-chan error
+	if !*once {
+		leaseErrors = maintainWatcherLease(ctx, db, continuousWatcherLeaseName, leaseOwner, continuousWatcherLeaseRenew, continuousWatcherLeaseTTL)
+	}
 
 	integrationSetupCtx, cancelIntegrationSetup := context.WithTimeout(ctx, 15*time.Second)
 	mediaManagers := reconcile.New(integrationSetupCtx, cfg)
@@ -218,8 +260,12 @@ func runWatchContext(ctx context.Context, args []string, stdout io.Writer) error
 		}
 	}
 	mediaManagers.SetSonarrFilenameCache(db)
-	password, err := secrets.Resolve(ctx, cfg.VLC)
+	password, err := resolveVLCCredential(ctx, cfg.VLC, *once, serviceLogger, leaseErrors, dependencies)
 	if err != nil {
+		if !*once && errors.Is(err, context.Canceled) {
+			serviceLogger.info(time.Now(), "Watcher stopped.")
+			return nil
+		}
 		return err
 	}
 	client := vlc.NewClient(cfg.VLC.Endpoint, password)
@@ -294,7 +340,6 @@ func runWatchContext(ctx context.Context, args []string, stdout io.Writer) error
 	if *once {
 		return poll(true)
 	}
-	leaseErrors := maintainWatcherLease(ctx, db, continuousWatcherLeaseName, leaseOwner, continuousWatcherLeaseRenew, continuousWatcherLeaseTTL)
 	serviceLogger.info(time.Now(), fmt.Sprintf("Watching VLC at %s every %s.", cfg.VLC.Endpoint, cfg.Watch.PollInterval))
 	ticker := time.NewTicker(cfg.Watch.PollInterval)
 	defer ticker.Stop()
@@ -315,6 +360,61 @@ func runWatchContext(ctx context.Context, args []string, stdout io.Writer) error
 			return err
 		case <-ticker.C:
 		}
+	}
+}
+
+func resolveVLCCredential(ctx context.Context, cfg config.VLCConfig, once bool, logger *watchServiceLogger, leaseErrors <-chan error, dependencies watchDependencies) (string, error) {
+	paused := false
+	for attempt := 0; ; attempt++ {
+		resolveCtx, cancel := context.WithTimeout(ctx, dependencies.credentialResolveLimit)
+		resolution := dependencies.resolveVLC(resolveCtx, cfg)
+		cancel()
+		if resolution.Ready() {
+			if paused {
+				logger.credentialRecovered(time.Now())
+			}
+			return resolution.Value, nil
+		}
+		if once {
+			return "", vlcCredentialResolutionError(resolution)
+		}
+		if !paused {
+			logger.credentialPaused(time.Now(), resolution.State)
+			paused = true
+		}
+		if err := waitForVLCCredentialRetry(ctx, leaseErrors, vlcCredentialRetryDelay(attempt, dependencies.credentialRetryDelays)); err != nil {
+			return "", err
+		}
+	}
+}
+
+func vlcCredentialResolutionError(resolution credentials.Resolution) error {
+	if strings.TrimSpace(resolution.SafeMessage) != "" {
+		return errors.New(resolution.SafeMessage)
+	}
+	return errors.New("VLC credential could not be resolved.")
+}
+
+func vlcCredentialRetryDelay(attempt int, delays []time.Duration) time.Duration {
+	if len(delays) == 0 {
+		return 5 * time.Minute
+	}
+	if attempt < len(delays) {
+		return delays[attempt]
+	}
+	return delays[len(delays)-1]
+}
+
+func waitForVLCCredentialRetry(ctx context.Context, leaseErrors <-chan error, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-leaseErrors:
+		return err
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -376,6 +476,37 @@ func (l *watchServiceLogger) pollRecovered(now time.Time, pollWarning string) {
 		l.lastWarning = ""
 		l.lastWarningAt = time.Time{}
 		l.suppressedWarnings = 0
+	}
+}
+
+func (l *watchServiceLogger) credentialPaused(now time.Time, state credentials.State) {
+	l.warning(now, vlcCredentialPausedMessage(state))
+}
+
+func (l *watchServiceLogger) credentialRecovered(now time.Time) {
+	l.info(now, "VLC credential repaired; resuming VLC observation.")
+	l.lastWarning = ""
+	l.lastWarningAt = time.Time{}
+	l.suppressedWarnings = 0
+}
+
+func vlcCredentialPausedMessage(state credentials.State) string {
+	const paused = "Watching is paused until the VLC credential is repaired; retrying automatically."
+	switch state {
+	case credentials.StateNotConfigured:
+		return "VLC credential is not configured. " + paused
+	case credentials.StateProviderUnavailable:
+		return "VLC credential provider is unavailable. " + paused
+	case credentials.StateNeedsUserAction:
+		return "VLC credential needs user action. " + paused
+	case credentials.StateCredentialMissing:
+		return "VLC credential is missing. " + paused
+	case credentials.StateCredentialDenied:
+		return "VLC credential access was denied. " + paused
+	case credentials.StateCredentialInvalid:
+		return "VLC credential is invalid. " + paused
+	default:
+		return "VLC credential needs repair. " + paused
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 )
 
 const appDirectory = "vlc-media-watcher"
@@ -79,6 +81,75 @@ type WatchConfig struct {
 
 type StorageConfig struct {
 	Path string `toml:"path"`
+}
+
+// CredentialRegistry normalizes the existing field-specific configuration
+// into provider-neutral stable IDs. It is intentionally read-only: this first
+// compatibility slice must not copy values, migrate providers, or rewrite a
+// user's configuration file.
+func (c Config) CredentialRegistry() (credentials.Registry, error) {
+	entries := []credentials.Entry{
+		{
+			Requirement: credentials.Requirement{ID: credentials.VLCPasswordID, Label: "VLC password", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored, Required: true},
+			Binding:     credentialBinding(c.VLC.SecretSource, c.VLC.SecretReference, c.VLC.PasswordEnv),
+		},
+		{
+			Requirement: credentials.Requirement{ID: credentials.SonarrAPIKeyID, Label: "Sonarr API key", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored},
+			Binding:     credentialBinding(c.Sonarr.SecretSource, c.Sonarr.SecretReference, c.Sonarr.APIKeyEnv),
+		},
+		{
+			Requirement: credentials.Requirement{ID: credentials.RadarrAPIKeyID, Label: "Radarr API key", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored},
+			Binding:     credentialBinding(c.Radarr.SecretSource, c.Radarr.SecretReference, c.Radarr.APIKeyEnv),
+		},
+	}
+
+	for _, name := range []string{"anilist", "myanimelist", "trakt", "simkl"} {
+		tracker := c.Trackers[name]
+		entries = append(entries, credentials.Entry{
+			Requirement: credentials.Requirement{ID: credentials.TrackerAccessTokenID(name), Label: trackerLabel(name) + " access token", Kind: trackerAccessTokenKind(name), Ownership: credentials.AppWritten},
+			Binding:     credentialBinding(tracker.SecretSource, tracker.SecretReference, tracker.AccessTokenEnv),
+		})
+		if name == "anilist" || name == "trakt" {
+			entries = append(entries, credentials.Entry{
+				Requirement: credentials.Requirement{ID: credentials.TrackerClientSecretID(name), Label: trackerLabel(name) + " OAuth client secret", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored},
+				Binding:     credentialBinding(tracker.ClientSecretSource, tracker.ClientSecretReference, tracker.ClientSecretEnv),
+			})
+		}
+	}
+
+	return credentials.NewRegistry(entries...)
+}
+
+func trackerAccessTokenKind(name string) credentials.Kind {
+	switch name {
+	case "myanimelist", "trakt":
+		return credentials.RenewableToken
+	default:
+		return credentials.OpaqueSecret
+	}
+}
+
+func credentialBinding(source, reference, environment string) credentials.Binding {
+	return credentials.Binding{
+		Provider:    credentials.Provider(source),
+		Locator:     reference,
+		Environment: environment,
+	}
+}
+
+func trackerLabel(name string) string {
+	switch name {
+	case "anilist":
+		return "AniList"
+	case "myanimelist":
+		return "MyAnimeList"
+	case "trakt":
+		return "Trakt"
+	case "simkl":
+		return "SIMKL"
+	default:
+		return name
+	}
 }
 
 // DefaultPath returns the platform-appropriate path for the application

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 )
 
 func TestWriteExampleAndLoad(t *testing.T) {
@@ -348,6 +350,49 @@ func TestLegacyMonitoredSettingsMigrateToUnmonitorAfterWatch(t *testing.T) {
 	migrateLegacyMediaManager(&legacyDisabled, false)
 	if legacyDisabled.UnmonitorAfterWatch {
 		t.Fatal("legacy monitor-after-watch configuration should be disabled")
+	}
+}
+
+func TestCredentialRegistryNormalizesExistingFieldsWithoutMutatingConfig(t *testing.T) {
+	cfg := Config{
+		VLC:    VLCConfig{SecretSource: "environment", PasswordEnv: "VLC_PASSWORD"},
+		Sonarr: MediaManagerConfig{SecretSource: "1password", SecretReference: "op://redacted"},
+		Radarr: MediaManagerConfig{SecretSource: "keyring", SecretReference: "default/radarr-api-key"},
+		Trackers: map[string]TrackerConfig{
+			"anilist": {
+				SecretSource:          "keyring",
+				SecretReference:       "default/anilist-access-token",
+				ClientSecretSource:    "1password",
+				ClientSecretReference: "op://redacted",
+			},
+		},
+	}
+	wantUnchanged := cfg
+	wantUnchanged.Trackers = map[string]TrackerConfig{"anilist": cfg.Trackers["anilist"]}
+
+	registry, err := cfg.CredentialRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, wantUnchanged) {
+		t.Fatalf("CredentialRegistry() mutated config: %#v", cfg)
+	}
+
+	vlc, ok := registry.Entry(credentials.VLCPasswordID)
+	if !ok || vlc.Binding.Provider != credentials.ProviderEnvironment || vlc.Binding.Environment != "VLC_PASSWORD" || !vlc.Requirement.Required {
+		t.Fatalf("VLC registry entry = %#v", vlc)
+	}
+	clientSecret, ok := registry.Entry(credentials.TrackerClientSecretID("anilist"))
+	if !ok || clientSecret.Requirement.Ownership != credentials.UserStored || clientSecret.Binding.Provider != credentials.Provider1Password {
+		t.Fatalf("AniList client-secret registry entry = %#v", clientSecret)
+	}
+	accessToken, ok := registry.Entry(credentials.TrackerAccessTokenID("anilist"))
+	if !ok || accessToken.Requirement.Ownership != credentials.AppWritten || accessToken.Binding.Provider != credentials.ProviderKeychain {
+		t.Fatalf("AniList access-token registry entry = %#v", accessToken)
+	}
+	myAnimeList, ok := registry.Entry(credentials.TrackerAccessTokenID("myanimelist"))
+	if !ok || myAnimeList.Requirement.Kind != credentials.RenewableToken || myAnimeList.Requirement.Ownership != credentials.AppWritten {
+		t.Fatalf("MyAnimeList access-token registry entry = %#v", myAnimeList)
 	}
 }
 
