@@ -513,7 +513,15 @@ func (m *Model) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selecting = false
 			m.selectionOptions = nil
 			if selected.custom {
-				m.input = m.settings()[m.selected].value
+				value := m.settings()[m.selected].value
+				// A provider rebind creates an explicit placeholder only to make
+				// the missing binding visible. It is not a useful value to edit,
+				// and keeping it here forces the user to erase it before entering
+				// the real 1Password reference.
+				if isSecretReferenceSetting(m.settings()[m.selected].id) && strings.HasPrefix(value, "op://REPLACE-ME/") {
+					value = ""
+				}
+				m.input = value
 				m.setMessage("Enter a custom value for "+m.settings()[m.selected].name+". Enter saves; Esc cancels.", messageToneNeutral)
 				return m, nil
 			}

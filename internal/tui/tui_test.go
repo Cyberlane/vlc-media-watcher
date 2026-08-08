@@ -427,6 +427,36 @@ func TestDefaultProviderAndExplicitOverrideRebindWithoutCopyingAValue(t *testing
 	}
 }
 
+func TestPlaceholder1PasswordReferenceStartsBlankWhenCustomized(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := testConfig(t)
+	cfg.VLC.SecretSource = "1password"
+	cfg.VLC.SecretReference = "op://REPLACE-ME/vlc-password"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	m := New(path, cfg)
+	m.view = settingsView
+	m.selected = settingIndex(t, m, vlcSecretReferenceSetting)
+
+	_, _ = m.updateKey(keyMsg("enter"))
+	_, _ = m.updateKey(keyMsg("down"))
+	_, _ = m.updateKey(keyMsg("enter"))
+	if m.input != "" {
+		t.Fatalf("placeholder custom input = %q, want blank", m.input)
+	}
+
+	m.editing = false
+	m.selecting = false
+	m.config.VLC.SecretReference = "op://Private/VLC/password"
+	_, _ = m.updateKey(keyMsg("enter"))
+	_, _ = m.updateKey(keyMsg("down"))
+	_, _ = m.updateKey(keyMsg("enter"))
+	if m.input != "op://Private/VLC/password" {
+		t.Fatalf("existing reference custom input = %q", m.input)
+	}
+}
+
 func TestCredentialTestAndKeychainEntryKeepTheSecretHidden(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := testConfig(t)
