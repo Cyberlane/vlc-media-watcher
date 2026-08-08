@@ -12,6 +12,7 @@ import (
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/arr"
 	"github.com/Cyberlane/vlc-media-watcher/internal/config"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 	"github.com/Cyberlane/vlc-media-watcher/internal/secrets"
 )
 
@@ -43,18 +44,21 @@ type client interface {
 }
 
 type resolveSecretFunc func(context.Context, string, string, string, string) (string, error)
+type resolveManagerCredentialFunc func(context.Context, arr.Manager, config.MediaManagerConfig) credentials.Resolution
 type clientFactoryFunc func(arr.Manager, string, string) (client, error)
 
 type dependencies struct {
-	resolveSecret resolveSecretFunc
-	newClient     clientFactoryFunc
+	resolveSecret            resolveSecretFunc
+	resolveManagerCredential resolveManagerCredentialFunc
+	newClient                clientFactoryFunc
 }
 
 type managerState struct {
-	manager arr.Manager
-	config  config.MediaManagerConfig
-	client  client
-	initErr error
+	manager         arr.Manager
+	config          config.MediaManagerConfig
+	client          client
+	initErr         error
+	credentialState credentials.State
 }
 
 // Reconciler owns the enabled media-manager clients. Construction never
@@ -98,8 +102,10 @@ func (r *Reconciler) SetSonarrFilenameCache(cache arr.SonarrFilenameCache) {
 
 func productionDependencies() dependencies {
 	return dependencies{
-		resolveSecret: secrets.ResolveValue,
-		newClient:     newARRClient,
+		resolveManagerCredential: func(ctx context.Context, manager arr.Manager, cfg config.MediaManagerConfig) credentials.Resolution {
+			return secrets.ResolveMediaManager(ctx, string(manager), cfg)
+		},
+		newClient: newARRClient,
 	}
 }
 
@@ -151,16 +157,24 @@ func newReconcilerForManager(ctx context.Context, cfg *config.Config, deps depen
 			continue
 		}
 
-		apiKey, err := deps.resolveSecret(ctx, apiKeyLabel(item.manager), item.config.SecretSource, item.config.SecretReference, item.config.APIKeyEnv)
-		if err != nil {
-			state.initErr = fmt.Errorf("resolve API key: %w", err)
+		resolveCtx, cancelResolve := context.WithTimeout(ctx, secrets.BackgroundResolveTimeout)
+		resolution, typed := deps.resolveManager(resolveCtx, item.manager, item.config)
+		cancelResolve()
+		if !resolution.Ready() {
+			if typed {
+				state.credentialState = resolution.State
+				state.initErr = secrets.SafeResolutionError(resolution)
+			} else {
+				state.initErr = resolution.Err
+			}
 			reconciler.managers = append(reconciler.managers, state)
 			continue
 		}
 
-		state.client, err = deps.newClient(item.manager, item.config.Endpoint, apiKey)
-		if err != nil {
-			state.initErr = fmt.Errorf("create client: %w", err)
+		client, clientErr := deps.newClient(item.manager, item.config.Endpoint, resolution.Value)
+		state.client = client
+		if clientErr != nil {
+			state.initErr = fmt.Errorf("create client: %w", clientErr)
 		}
 		reconciler.managers = append(reconciler.managers, state)
 	}
@@ -185,6 +199,10 @@ func (r *Reconciler) Problems() []string {
 	problems := append([]string(nil), r.globalProblems...)
 	for _, state := range r.managers {
 		if state.initErr != nil {
+			if state.credentialState != "" {
+				problems = append(problems, managerCredentialProblem(state.manager, state.credentialState))
+				continue
+			}
 			problems = append(problems, fmt.Sprintf("%s setup problem: %v", managerName(state.manager), state.initErr))
 		}
 	}
@@ -207,10 +225,22 @@ func (r *Reconciler) Process(ctx context.Context, mediaPath string) Outcome {
 		ctx = context.Background()
 	}
 
+	readyManagers := make([]managerState, 0, len(r.managers))
+	pausedManagers := make([]string, 0, len(r.managers))
 	for _, state := range r.managers {
 		if state.initErr != nil || state.client == nil {
-			return outcome(StatusFailed, fmt.Sprintf("%s is enabled but not ready; review its setup. No remote monitored-state change was made.", managerName(state.manager)))
+			if state.credentialState != "" {
+				pausedManagers = append(pausedManagers, managerCredentialProblem(state.manager, state.credentialState))
+			} else {
+				pausedManagers = append(pausedManagers, fmt.Sprintf("%s is enabled but not ready; review its setup.", managerName(state.manager)))
+			}
+			continue
 		}
+		readyManagers = append(readyManagers, state)
+	}
+	if len(readyManagers) == 0 {
+		messages := append(pausedManagers, "No remote monitored-state change was made.")
+		return Outcome{Status: StatusFailed, Messages: messages}
 	}
 
 	type foundMatch struct {
@@ -220,7 +250,7 @@ func (r *Reconciler) Process(ctx context.Context, mediaPath string) Outcome {
 	matches := make([]foundMatch, 0, 1)
 	lookupFailures := make([]string, 0)
 
-	for _, state := range r.managers {
+	for _, state := range readyManagers {
 		lookupCtx, cancelLookup := context.WithTimeout(ctx, managerLookupTimeout)
 		match, found, err := state.client.Find(lookupCtx, mediaPath, pathMapping(state.config))
 		cancelLookup()
@@ -244,6 +274,10 @@ func (r *Reconciler) Process(ctx context.Context, mediaPath string) Outcome {
 
 	if len(lookupFailures) > 0 {
 		return Outcome{Status: StatusFailed, Messages: lookupFailures}
+	}
+	if len(matches) == 0 && len(pausedManagers) > 0 {
+		messages := append(pausedManagers, "No exact ready media-manager match was found; no remote monitored-state change was made.")
+		return Outcome{Status: StatusFailed, Messages: messages}
 	}
 	if len(matches) == 0 {
 		return outcome(StatusUnmatched, "No exact Sonarr or Radarr library match was found; no remote monitored-state change was made.")
@@ -291,16 +325,21 @@ func (r *Reconciler) resolve(ctx context.Context, mediaPath string, onlyManager 
 		ctx = context.Background()
 	}
 	states := make([]managerState, 0, len(r.managers))
+	pausedManagers := make([]arr.Manager, 0, len(r.managers))
 	for _, state := range r.managers {
 		if onlyManager != "" && state.manager != onlyManager {
 			continue
 		}
-		states = append(states, state)
 		if state.initErr != nil || state.client == nil {
-			return arr.Match{}, fmt.Errorf("%s is not ready for read-only resolution", managerName(state.manager))
+			pausedManagers = append(pausedManagers, state.manager)
+			continue
 		}
+		states = append(states, state)
 	}
 	if len(states) == 0 {
+		if len(pausedManagers) > 0 {
+			return arr.Match{}, fmt.Errorf("%s is not ready for read-only resolution", managerName(pausedManagers[0]))
+		}
 		return arr.Match{}, fmt.Errorf("%s is not enabled for read-only resolution", managerName(onlyManager))
 	}
 	matches := make([]arr.Match, 0, 1)
@@ -351,11 +390,16 @@ func testService(ctx context.Context, cfg *config.Config, service arr.Manager, d
 		return arr.Instance{}, err
 	}
 
-	apiKey, err := deps.resolveSecret(ctx, apiKeyLabel(service), managerConfig.SecretSource, managerConfig.SecretReference, managerConfig.APIKeyEnv)
-	if err != nil {
-		return arr.Instance{}, fmt.Errorf("resolve %s API key: %w", managerName(service), err)
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, secrets.ForegroundResolveTimeout)
+	resolution, typed := deps.resolveManager(resolveCtx, service, managerConfig)
+	cancelResolve()
+	if !resolution.Ready() {
+		if typed {
+			return arr.Instance{}, secrets.SafeResolutionError(resolution)
+		}
+		return arr.Instance{}, resolution.Err
 	}
-	managerClient, err := deps.newClient(service, managerConfig.Endpoint, apiKey)
+	managerClient, err := deps.newClient(service, managerConfig.Endpoint, resolution.Value)
 	if err != nil {
 		return arr.Instance{}, fmt.Errorf("create %s client: %w", managerName(service), err)
 	}
@@ -374,6 +418,40 @@ func testService(ctx context.Context, cfg *config.Config, service arr.Manager, d
 		return arr.Instance{}, fmt.Errorf("%s endpoint did not report a version", managerName(service))
 	}
 	return instance, nil
+}
+
+func (d dependencies) resolveManager(ctx context.Context, manager arr.Manager, cfg config.MediaManagerConfig) (credentials.Resolution, bool) {
+	if d.resolveManagerCredential != nil {
+		return d.resolveManagerCredential(ctx, manager, cfg), true
+	}
+	if d.resolveSecret == nil {
+		return credentials.Resolution{State: credentials.StateCredentialInvalid, SafeMessage: "Media-manager credential could not be resolved."}, true
+	}
+	value, err := d.resolveSecret(ctx, apiKeyLabel(manager), cfg.SecretSource, cfg.SecretReference, cfg.APIKeyEnv)
+	if err != nil {
+		return credentials.Resolution{State: credentials.StateNeedsUserAction, Err: err}, false
+	}
+	return credentials.Resolution{State: credentials.StateReady, Value: value}, false
+}
+
+func managerCredentialProblem(manager arr.Manager, state credentials.State) string {
+	name := managerName(manager)
+	switch state {
+	case credentials.StateNotConfigured:
+		return fmt.Sprintf("%s API key is not configured; %s is paused until repaired.", name, name)
+	case credentials.StateProviderUnavailable:
+		return fmt.Sprintf("%s API-key provider is unavailable; %s is paused until repaired.", name, name)
+	case credentials.StateNeedsUserAction:
+		return fmt.Sprintf("%s API key needs user action; %s is paused until repaired.", name, name)
+	case credentials.StateCredentialMissing:
+		return fmt.Sprintf("%s API key is missing; %s is paused until repaired.", name, name)
+	case credentials.StateCredentialDenied:
+		return fmt.Sprintf("%s API-key access was denied; %s is paused until repaired.", name, name)
+	case credentials.StateCredentialInvalid:
+		return fmt.Sprintf("%s API key is invalid; %s is paused until repaired.", name, name)
+	default:
+		return fmt.Sprintf("%s credential needs repair; %s is paused until repaired.", name, name)
+	}
 }
 
 func selectedManagerConfig(cfg *config.Config, service arr.Manager) (config.MediaManagerConfig, error) {

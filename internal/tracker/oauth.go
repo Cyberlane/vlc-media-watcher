@@ -33,6 +33,9 @@ type LinkResult struct {
 // access token. The caller is responsible for writing that token to its secret
 // store; it is never placed in a URL, config file, log, or database.
 func Link(ctx context.Context, service Service, cfg config.TrackerConfig, openURL func(string) error) (LinkResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		return LinkResult{}, fmt.Errorf("set the %s application client ID before linking", service)
 	}
@@ -54,10 +57,13 @@ func Link(ctx context.Context, service Service, cfg config.TrackerConfig, openUR
 	}
 	clientSecret := ""
 	if service == AniList || service == Trakt {
-		clientSecret, err = secrets.ResolveValue(ctx, fmt.Sprintf("%s OAuth client secret", title(service)), cfg.ClientSecretSource, cfg.ClientSecretReference, cfg.ClientSecretEnv)
-		if err != nil {
-			return LinkResult{}, err
+		resolveCtx, cancelResolve := context.WithTimeout(ctx, secrets.ForegroundResolveTimeout)
+		resolution := secrets.ResolveTrackerClientSecret(resolveCtx, string(service), cfg)
+		cancelResolve()
+		if !resolution.Ready() {
+			return LinkResult{}, secrets.SafeResolutionError(resolution)
 		}
+		clientSecret = resolution.Value
 	}
 
 	authorizeURL, err := authorizationURL(service, cfg.ClientID, state, verifier)

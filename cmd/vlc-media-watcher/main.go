@@ -156,7 +156,7 @@ const (
 	continuousWatcherLeaseTTL     = 30 * time.Second
 	continuousWatcherLeaseRenew   = 10 * time.Second
 	repeatedWarningReportInterval = 15 * time.Minute
-	vlcCredentialResolveTimeout   = 10 * time.Second
+	vlcCredentialResolveTimeout   = secrets.BackgroundResolveTimeout
 )
 
 var defaultVLCCredentialRetryDelays = []time.Duration{
@@ -659,7 +659,7 @@ func runIntegrations(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), secrets.ForegroundResolveTimeout)
 	defer cancel()
 	instance, err := reconcile.Test(ctx, cfg, manager)
 	if err != nil {

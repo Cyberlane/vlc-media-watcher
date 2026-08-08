@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cyberlane/vlc-media-watcher/internal/config"
 )
 
 func TestAuthorizationURLUsesStateAndPKCEForPublicDesktopTrackers(t *testing.T) {
@@ -57,5 +59,30 @@ func TestWaitForCodeRejectsMismatchedState(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "state did not match") {
 		t.Fatalf("waitForCode error = %v", err)
+	}
+}
+
+func TestLinkFailsSafelyBeforeOpeningBrowserWhenClientSecretIsUnavailable(t *testing.T) {
+	const missingEnvironment = "VLC_MEDIA_WATCHER_TEST_MISSING_ANILIST_CLIENT_SECRET"
+	opened := false
+	_, err := Link(context.Background(), AniList, config.TrackerConfig{
+		ClientID:           "test-client-id",
+		ClientSecretSource: "environment",
+		ClientSecretEnv:    missingEnvironment,
+	}, func(string) error {
+		opened = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("Link() error = nil, want unavailable client-secret error")
+	}
+	if opened {
+		t.Fatal("Link() opened the browser after a credential failure")
+	}
+	if !strings.Contains(err.Error(), "AniList OAuth client secret is not available") {
+		t.Fatalf("Link() error = %q", err)
+	}
+	if strings.Contains(err.Error(), missingEnvironment) {
+		t.Fatalf("Link() error leaked environment name: %q", err)
 	}
 }

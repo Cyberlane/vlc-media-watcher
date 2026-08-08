@@ -9,6 +9,7 @@ import (
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/arr"
 	"github.com/Cyberlane/vlc-media-watcher/internal/config"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 )
 
 func TestDisabledManagersMakeNoCalls(t *testing.T) {
@@ -58,6 +59,35 @@ func TestInitializationFailureIsStoredAndFailsClosed(t *testing.T) {
 		t.Fatalf("factory calls = %v, want none", environment.factoryCalls)
 	}
 	assertClientCalls(t, environment.clients[arr.ManagerSonarr], 0, 0, 0)
+}
+
+func TestCredentialFailurePausesOnlyTheAffectedManager(t *testing.T) {
+	cfg := testConfig()
+	cfg.Sonarr.UpdateMonitored = true
+	cfg.Radarr.UpdateMonitored = true
+	environment := newFakeEnvironment()
+	environment.clients[arr.ManagerRadarr].match = exactMatch(arr.ManagerRadarr, true)
+	environment.clients[arr.ManagerRadarr].found = true
+	dependencies := environment.dependencies()
+	dependencies.resolveManagerCredential = func(_ context.Context, manager arr.Manager, _ config.MediaManagerConfig) credentials.Resolution {
+		if manager == arr.ManagerSonarr {
+			return credentials.Resolution{State: credentials.StateProviderUnavailable, SafeMessage: "op://private/sonarr/api-key"}
+		}
+		return credentials.Resolution{State: credentials.StateReady, Value: "radarr-api-key", SafeMessage: "Ready"}
+	}
+
+	reconciler := newReconciler(context.Background(), cfg, dependencies)
+	problems := reconciler.Problems()
+	if len(problems) != 1 || !strings.Contains(problems[0], "Sonarr API-key provider is unavailable") || strings.Contains(problems[0], "op://private") {
+		t.Fatalf("Problems() = %v", problems)
+	}
+
+	outcome := reconciler.Process(context.Background(), "/media/example.mkv")
+	if outcome.Status != StatusUnmonitored {
+		t.Fatalf("Process() status = %q, want %q (%v)", outcome.Status, StatusUnmonitored, outcome.Messages)
+	}
+	assertClientCalls(t, environment.clients[arr.ManagerSonarr], 0, 0, 0)
+	assertClientCalls(t, environment.clients[arr.ManagerRadarr], 0, 1, 1)
 }
 
 func TestNoMatchesChecksEveryActiveManager(t *testing.T) {

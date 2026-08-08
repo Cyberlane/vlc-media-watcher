@@ -801,7 +801,7 @@ func (m *Model) displayedMessage() messageState {
 func (m *Model) validateConnection(service string) tea.Cmd {
 	cfg := *m.config
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), secrets.ForegroundResolveTimeout)
 		defer cancel()
 		manager := arr.Manager(service)
 		instance, err := m.validate(ctx, &cfg, manager)

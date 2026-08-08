@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Cyberlane/vlc-media-watcher/internal/config"
+	"github.com/Cyberlane/vlc-media-watcher/internal/credentials"
 	"github.com/Cyberlane/vlc-media-watcher/internal/secrets"
 	"github.com/Cyberlane/vlc-media-watcher/internal/store"
 	"github.com/Cyberlane/vlc-media-watcher/internal/watch"
@@ -25,6 +26,9 @@ func SyncAniListEventWithProgress(ctx context.Context, cfg config.TrackerConfig,
 }
 
 func syncAniListEvent(ctx context.Context, cfg config.TrackerConfig, db *store.Store, event watch.Event, report func(string)) (store.TrackerSyncJob, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !cfg.Enabled || !cfg.SyncProgress {
 		return store.TrackerSyncJob{}, nil
 	}
@@ -63,13 +67,17 @@ func syncAniListEvent(ctx context.Context, cfg config.TrackerConfig, db *store.S
 	if report != nil {
 		report("Reading the secured AniList account token…")
 	}
-	token, err := secrets.ResolveValue(ctx, "AniList access token", cfg.SecretSource, cfg.SecretReference, cfg.AccessTokenEnv)
-	if err != nil {
-		job := store.TrackerSyncJob{EventPath: event.MediaPath, Tracker: string(AniList), TrackerID: mapping.TrackerID, Status: "failed", Detail: "AniList access token is unavailable; relink the account."}
-		_ = db.UpsertTrackerSyncJob(job)
-		return job, err
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, secrets.BackgroundResolveTimeout)
+	resolution := secrets.ResolveTrackerAccessToken(resolveCtx, string(AniList), cfg)
+	cancelResolve()
+	if !resolution.Ready() {
+		job := store.TrackerSyncJob{EventPath: event.MediaPath, Tracker: string(AniList), TrackerID: mapping.TrackerID, Status: "failed", Detail: trackerCredentialFailureDetail(resolution.State)}
+		if err := db.UpsertTrackerSyncJob(job); err != nil {
+			return job, fmt.Errorf("record AniList credential failure: %w", err)
+		}
+		return job, secrets.SafeResolutionError(resolution)
 	}
-	result, err := syncAniListProgress(ctx, token, mapping.TrackerID, event.EpisodeNumbers, report)
+	result, err := syncAniListProgress(ctx, resolution.Value, mapping.TrackerID, event.EpisodeNumbers, report)
 	job := store.TrackerSyncJob{EventPath: event.MediaPath, Tracker: string(AniList), TrackerID: mapping.TrackerID, Status: result.Status, Detail: result.Detail, TargetProgress: result.TargetProgress}
 	if err != nil {
 		job.Status = "failed"
@@ -79,4 +87,23 @@ func syncAniListEvent(ctx context.Context, cfg config.TrackerConfig, db *store.S
 		return job, saveErr
 	}
 	return job, err
+}
+
+func trackerCredentialFailureDetail(state credentials.State) string {
+	switch state {
+	case credentials.StateNotConfigured:
+		return "AniList access token is not configured; relink the account."
+	case credentials.StateProviderUnavailable:
+		return "AniList token provider is unavailable; retry after repairing it."
+	case credentials.StateNeedsUserAction:
+		return "AniList token needs user action; relink the account."
+	case credentials.StateCredentialMissing:
+		return "AniList access token is missing; relink the account."
+	case credentials.StateCredentialDenied:
+		return "AniList access-token access was denied; repair the credential binding."
+	case credentials.StateCredentialInvalid:
+		return "AniList access token is invalid; relink the account."
+	default:
+		return "AniList access token needs repair; relink the account."
+	}
 }

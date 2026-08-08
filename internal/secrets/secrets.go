@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -15,6 +16,15 @@ import (
 )
 
 const KeyringService = "vlc-media-watcher"
+
+const (
+	// BackgroundResolveTimeout is the hard limit for a non-interactive
+	// credential read performed by the watcher service.
+	BackgroundResolveTimeout = 10 * time.Second
+	// ForegroundResolveTimeout leaves room for an intentional user-owned
+	// authorization or unlock action in the TUI.
+	ForegroundResolveTimeout = 60 * time.Second
+)
 
 // Keyring provides the small read/write seam needed by credential resolution.
 // Its implementation is deliberately injected so tests never contact a real
@@ -89,6 +99,70 @@ func ResolveVLC(ctx context.Context, cfg config.VLCConfig) credentials.Resolutio
 		credentials.Requirement{ID: credentials.VLCPasswordID, Label: "VLC password", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored, Required: true},
 		credentials.Binding{Provider: credentials.Provider(cfg.SecretSource), Locator: cfg.SecretReference, Environment: cfg.PasswordEnv},
 	)
+}
+
+// ResolveMediaManager resolves a Sonarr or Radarr API key through its stable
+// provider-neutral credential ID.
+func ResolveMediaManager(ctx context.Context, manager string, cfg config.MediaManagerConfig) credentials.Resolution {
+	requirement := credentials.Requirement{Label: "Media manager API key", Kind: credentials.OpaqueSecret, Ownership: credentials.UserStored}
+	switch strings.ToLower(strings.TrimSpace(manager)) {
+	case "sonarr":
+		requirement.ID = credentials.SonarrAPIKeyID
+		requirement.Label = "Sonarr API key"
+	case "radarr":
+		requirement.ID = credentials.RadarrAPIKeyID
+		requirement.Label = "Radarr API key"
+	default:
+		return failed(credentials.StateCredentialInvalid, "Media-manager credential uses an unsupported manager.", fmt.Errorf("unsupported media manager %q", manager))
+	}
+	return NewResolver(Dependencies{}).Resolve(ctx, requirement, credentials.Binding{
+		Provider:    credentials.Provider(cfg.SecretSource),
+		Locator:     cfg.SecretReference,
+		Environment: cfg.APIKeyEnv,
+	})
+}
+
+// ResolveTrackerAccessToken resolves an app-owned tracker access token. The
+// selected binding is read only here; token writes remain an explicit TUI
+// action and use the Keychain destination approved for app-owned values.
+func ResolveTrackerAccessToken(ctx context.Context, tracker string, cfg config.TrackerConfig) credentials.Resolution {
+	name := strings.ToLower(strings.TrimSpace(tracker))
+	return NewResolver(Dependencies{}).Resolve(ctx, credentials.Requirement{
+		ID:        credentials.TrackerAccessTokenID(name),
+		Label:     trackerLabel(name) + " access token",
+		Kind:      trackerAccessTokenKind(name),
+		Ownership: credentials.AppWritten,
+	}, credentials.Binding{
+		Provider:    credentials.Provider(cfg.SecretSource),
+		Locator:     cfg.SecretReference,
+		Environment: cfg.AccessTokenEnv,
+	})
+}
+
+// ResolveTrackerClientSecret resolves the user-stored OAuth client secret for
+// a tracker whose OAuth exchange requires one.
+func ResolveTrackerClientSecret(ctx context.Context, tracker string, cfg config.TrackerConfig) credentials.Resolution {
+	name := strings.ToLower(strings.TrimSpace(tracker))
+	return NewResolver(Dependencies{}).Resolve(ctx, credentials.Requirement{
+		ID:        credentials.TrackerClientSecretID(name),
+		Label:     trackerLabel(name) + " OAuth client secret",
+		Kind:      credentials.OpaqueSecret,
+		Ownership: credentials.UserStored,
+	}, credentials.Binding{
+		Provider:    credentials.Provider(cfg.ClientSecretSource),
+		Locator:     cfg.ClientSecretReference,
+		Environment: cfg.ClientSecretEnv,
+	})
+}
+
+// SafeResolutionError preserves only the contract's safe user-facing message
+// when an existing caller still needs an error return. It never returns a
+// provider error, locator, or environment name.
+func SafeResolutionError(resolution credentials.Resolution) error {
+	if strings.TrimSpace(resolution.SafeMessage) != "" {
+		return errors.New(resolution.SafeMessage)
+	}
+	return errors.New("Credential could not be resolved.")
 }
 
 func Resolve(ctx context.Context, cfg config.VLCConfig) (string, error) {
@@ -207,6 +281,28 @@ func classify1PasswordError(ctx context.Context, err error) credentials.State {
 		return credentials.StateProviderUnavailable
 	}
 	return credentials.StateNeedsUserAction
+}
+
+func trackerLabel(name string) string {
+	switch name {
+	case "anilist":
+		return "AniList"
+	case "myanimelist":
+		return "MyAnimeList"
+	case "simkl":
+		return "SIMKL"
+	default:
+		return "Trakt"
+	}
+}
+
+func trackerAccessTokenKind(name string) credentials.Kind {
+	switch name {
+	case "myanimelist", "trakt":
+		return credentials.RenewableToken
+	default:
+		return credentials.OpaqueSecret
+	}
 }
 
 func StoreInKeyring(reference, secret string) error {
