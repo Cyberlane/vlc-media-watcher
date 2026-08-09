@@ -1,6 +1,6 @@
 # Support
 
-## Platform tiers for v0.1
+## Platform tiers
 
 | Tier | Platform | Commitment |
 | --- | --- | --- |

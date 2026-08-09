@@ -1,5 +1,11 @@
 # VLC Media Watcher
 
+[![CI](https://github.com/Cyberlane/vlc-media-watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/Cyberlane/vlc-media-watcher/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Cyberlane/vlc-media-watcher/actions/workflows/codeql.yml/badge.svg)](https://github.com/Cyberlane/vlc-media-watcher/actions/workflows/codeql.yml)
+[![Latest release](https://img.shields.io/github/v/release/Cyberlane/vlc-media-watcher)](https://github.com/Cyberlane/vlc-media-watcher/releases/latest)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Cyberlane/vlc-media-watcher.svg)](https://pkg.go.dev/github.com/Cyberlane/vlc-media-watcher)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 VLC Media Watcher is a local, compiled watcher that records completed VLC playback in SQLite. It can optionally identify the exact file in Sonarr or Radarr, unmonitor that file after it is watched, and maintain explicitly confirmed tracker mappings.
 
 It is not a hosted web application. The recommended operating model is:
@@ -91,7 +97,7 @@ See [Background service](docs/service.md) for lifecycle, logging, upgrades, Linu
 
 ## What is implemented
 
-| Area | v0.1 behavior | External write |
+| Area | Current behavior | External write |
 | --- | --- | --- |
 | VLC | Local HTTP polling, completion thresholds, deduplicated local history | No |
 | Sonarr | Exact path or uniquely verified basename matching; optional unmonitor-after-watch | Off by default |
@@ -102,7 +108,7 @@ See [Background service](docs/service.md) for lifecycle, logging, upgrades, Linu
 | Trakt | Catalog search, OAuth authorization-code linking, confirmed series/movie mappings | No progress write |
 | SIMKL | PKCE OAuth linking and manual exact-ID confirmation | No catalog search or progress write |
 
-Tracker account linking does not enable progress sync. In v0.1 only AniList has a watched-progress writer, and that setting is independent and off by default.
+Tracker account linking does not enable progress sync. AniList is currently the only tracker with a watched-progress writer, and that setting is independent and off by default.
 
 ## Safety and privacy
 
@@ -168,8 +174,8 @@ Homebrew does not remove the per-user configuration or database. If you also wan
 
 ## Project status
 
-macOS with Homebrew is the primary supported installation for v0.1. Linux and Windows archives are built and tested in CI, but their native background-service setup is not packaged yet. See [Support](SUPPORT.md) for the current platform tiers.
+macOS with Homebrew is the primary supported installation. Linux and Windows archives are built and tested in CI, but their native background-service setup is not packaged yet. See [Support](SUPPORT.md) for the current platform tiers.
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), [SECURITY.md](SECURITY.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Licensed under the [MIT License](LICENSE).
