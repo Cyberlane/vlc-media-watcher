@@ -664,8 +664,7 @@ ON CONFLICT(manager, source_id, scope, season_number) DO UPDATE SET kind=exclude
 		if err != nil {
 			return nil, fmt.Errorf("upsert media identity: %w", err)
 		}
-		unit := MediaUnit{}
-		err = s.db.QueryRow(`SELECT id, manager, source_id, scope, season_number, kind, title, year, tvdb_id, tmdb_id, imdb_id FROM media_units WHERE manager=? AND source_id=? AND scope=? AND season_number=?`, string(identity.Manager), identity.SourceID, scope.name, scope.season).Scan(&unit.ID, &unit.Manager, &unit.SourceID, &unit.Scope, &unit.SeasonNumber, &unit.Kind, &unit.Title, &unit.Year, &unit.TVDBID, &unit.TMDBID, &unit.IMDbID)
+		unit, err := s.readMediaUnit(string(identity.Manager), identity.SourceID, scope.name, scope.season)
 		if err != nil {
 			return nil, fmt.Errorf("read media identity: %w", err)
 		}
@@ -695,10 +694,7 @@ func (s *Store) RecentMediaUnits(limit int) ([]MediaUnit, error) {
 // both the TUI and the non-interactive confirmation command, so mappings can
 // be repaired without replaying a media file.
 func (s *Store) MediaUnit(manager string, sourceID int, scope string, seasonNumber int) (MediaUnit, error) {
-	var unit MediaUnit
-	err := s.db.QueryRow(`SELECT id, manager, source_id, scope, season_number, kind, title, year, tvdb_id, tmdb_id, imdb_id
-FROM media_units WHERE manager=? AND source_id=? AND scope=? AND season_number=?`, manager, sourceID, scope, seasonNumber).
-		Scan(&unit.ID, &unit.Manager, &unit.SourceID, &unit.Scope, &unit.SeasonNumber, &unit.Kind, &unit.Title, &unit.Year, &unit.TVDBID, &unit.TMDBID, &unit.IMDbID)
+	unit, err := s.readMediaUnit(manager, sourceID, scope, seasonNumber)
 	if err == sql.ErrNoRows {
 		return MediaUnit{}, fmt.Errorf("media unit not found")
 	}
@@ -706,6 +702,14 @@ FROM media_units WHERE manager=? AND source_id=? AND scope=? AND season_number=?
 		return MediaUnit{}, fmt.Errorf("read media unit: %w", err)
 	}
 	return unit, nil
+}
+
+func (s *Store) readMediaUnit(manager string, sourceID int, scope string, seasonNumber int) (MediaUnit, error) {
+	var unit MediaUnit
+	err := s.db.QueryRow(`SELECT id, manager, source_id, scope, season_number, kind, title, year, tvdb_id, tmdb_id, imdb_id
+FROM media_units WHERE manager=? AND source_id=? AND scope=? AND season_number=?`, manager, sourceID, scope, seasonNumber).
+		Scan(&unit.ID, &unit.Manager, &unit.SourceID, &unit.Scope, &unit.SeasonNumber, &unit.Kind, &unit.Title, &unit.Year, &unit.TVDBID, &unit.TMDBID, &unit.IMDbID)
+	return unit, err
 }
 
 // ConfirmMapping is deliberately the only mapping write. Discovery/search may
