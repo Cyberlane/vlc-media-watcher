@@ -38,11 +38,11 @@ Database migrations are applied transactionally the next time the upgraded appli
 
 ## Linux
 
-The Homebrew formula can provide a service on Linuxbrew systems, but keyring access depends on an available Secret Service session. Release archives do not install a systemd unit in v0.1. If you create one, run it as the desktop user, use the normal per-user configuration path, and ensure its session can access the chosen secret source.
+The Homebrew formula can provide a service on Linuxbrew systems, but keyring access depends on an available Secret Service session. Release archives do not currently install a systemd unit. If you create one, run it as the desktop user, use the normal per-user configuration path, and ensure its session can access the chosen secret source.
 
 ## Windows
 
-Windows release archives include the continuous `watch` command and Credential Manager support, but v0.1 does not install a Windows Service or Scheduled Task. Run `watch` in a user session or configure a user-scoped task only after the one-poll check passes.
+Windows release archives include the continuous `watch` command and Credential Manager support, but do not currently install a Windows Service or Scheduled Task. Run `watch` in a user session or configure a user-scoped task only after the one-poll check passes.
 
 ## Recovery
 

@@ -4,6 +4,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation
+
+- Added the contributor code of conduct, code ownership, repository badges, and
+  clearer contribution and platform-support guidance.
+
 ## [0.2.0] - 2026-08-09
 
 ### Added

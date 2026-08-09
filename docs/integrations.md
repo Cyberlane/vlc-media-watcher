@@ -65,7 +65,7 @@ This records a local mapping only; it does not update tracker watch state.
 
 ## AniList progress
 
-AniList is the only tracker with a progress writer in v0.1. **Sync watched progress** is separate from linking and mapping, and is off by default. An exact Sonarr episode can advance progress through that episode. The watcher does not lower progress, exceed a verified season length, or complete a season before its verified final episode.
+AniList is currently the only tracker with a progress writer. **Sync watched progress** is separate from linking and mapping, and is off by default. An exact Sonarr episode can advance progress through that episode. The watcher does not lower progress, exceed a verified season length, or complete a season before its verified final episode.
 
 Every attempted sync records a success, failure, or review-needed state. Retry a selected item from Tracking only after reviewing its identity and mapping.
 
