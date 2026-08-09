@@ -73,11 +73,7 @@ type Reconciler struct {
 // New constructs a reconciler and resolves credentials for enabled managers.
 // Network connections are checked lazily by Process.
 func New(ctx context.Context, cfg *config.Config) *Reconciler {
-	if cfg != nil {
-		effective := cfg.EffectiveCredentialBindings()
-		return newReconciler(ctx, &effective, productionDependencies())
-	}
-	return newReconciler(ctx, cfg, productionDependencies())
+	return newReconciler(ctx, effectiveCredentialConfig(cfg), productionDependencies())
 }
 
 // NewForManager constructs a reconciler for one known source manager. It is
@@ -85,11 +81,15 @@ func New(ctx context.Context, cfg *config.Config) *Reconciler {
 // already says which library owns the file. Avoiding unrelated setup keeps a
 // Sonarr-only operation independent of Radarr credentials and availability.
 func NewForManager(ctx context.Context, cfg *config.Config, manager arr.Manager) *Reconciler {
-	if cfg != nil {
-		effective := cfg.EffectiveCredentialBindings()
-		return newReconcilerForManager(ctx, &effective, productionDependencies(), manager)
+	return newReconcilerForManager(ctx, effectiveCredentialConfig(cfg), productionDependencies(), manager)
+}
+
+func effectiveCredentialConfig(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
 	}
-	return newReconcilerForManager(ctx, cfg, productionDependencies(), manager)
+	effective := cfg.EffectiveCredentialBindings()
+	return &effective
 }
 
 // SetSonarrFilenameCache attaches an optional persistent cache to the Sonarr
@@ -379,11 +379,7 @@ func (r *Reconciler) resolve(ctx context.Context, mediaPath string, onlyManager 
 // Test validates, resolves, and checks one configured service regardless of
 // whether unmonitor-after-watch is enabled.
 func Test(ctx context.Context, cfg *config.Config, service arr.Manager) (arr.Instance, error) {
-	if cfg != nil {
-		effective := cfg.EffectiveCredentialBindings()
-		return testService(ctx, &effective, service, productionDependencies())
-	}
-	return testService(ctx, cfg, service, productionDependencies())
+	return testService(ctx, effectiveCredentialConfig(cfg), service, productionDependencies())
 }
 
 func testService(ctx context.Context, cfg *config.Config, service arr.Manager, deps dependencies) (arr.Instance, error) {
