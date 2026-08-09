@@ -260,34 +260,37 @@ func applyTrackerDefaults(cfg *Config) {
 		cfg.Trackers = make(map[string]TrackerConfig)
 	}
 	for _, name := range []string{"anilist", "anidb", "myanimelist", "trakt", "simkl"} {
-		tracker := cfg.Trackers[name]
-		// OAuth callbacks deliver a user access token to this local process.
-		// The client writes that token only to the system keychain, so using a
-		// selectable 1Password/environment source here was misleading and could
-		// leave linking unable to complete. Preserve client-secret flexibility,
-		// but migrate account tokens to their one supported durable location.
-		if name != "anidb" {
-			tracker.SecretSource = "keyring"
-			tracker.SecretReference = cfg.Profile + "/" + name + "-access-token"
-			tracker.AccessTokenEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_ACCESS_TOKEN"
-		}
-		if tracker.ClientSecretSource == "" {
-			tracker.ClientSecretSource = "keyring"
-		}
-		if tracker.ClientSecretReference == "" {
-			tracker.ClientSecretReference = cfg.Profile + "/" + name + "-client-secret"
-		}
-		if tracker.ClientSecretEnv == "" {
-			tracker.ClientSecretEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_CLIENT_SECRET"
-		}
-		if tracker.SecretReference == "" {
-			tracker.SecretReference = cfg.Profile + "/" + name + "-access-token"
-		}
-		if tracker.AccessTokenEnv == "" {
-			tracker.AccessTokenEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_ACCESS_TOKEN"
-		}
-		cfg.Trackers[name] = tracker
+		cfg.Trackers[name] = trackerWithCredentialDefaults(cfg.Profile, name, cfg.Trackers[name])
 	}
+}
+
+func trackerWithCredentialDefaults(profile, name string, tracker TrackerConfig) TrackerConfig {
+	// OAuth callbacks deliver a user access token to this local process. The
+	// client writes that token only to the system keychain, so using a selectable
+	// 1Password/environment source here was misleading and could leave linking
+	// unable to complete. Preserve client-secret flexibility, but migrate account
+	// tokens to their one supported durable location.
+	if name != "anidb" {
+		tracker.SecretSource = "keyring"
+		tracker.SecretReference = profile + "/" + name + "-access-token"
+		tracker.AccessTokenEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_ACCESS_TOKEN"
+	}
+	if tracker.ClientSecretSource == "" {
+		tracker.ClientSecretSource = "keyring"
+	}
+	if tracker.ClientSecretReference == "" {
+		tracker.ClientSecretReference = profile + "/" + name + "-client-secret"
+	}
+	if tracker.ClientSecretEnv == "" {
+		tracker.ClientSecretEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_CLIENT_SECRET"
+	}
+	if tracker.SecretReference == "" {
+		tracker.SecretReference = profile + "/" + name + "-access-token"
+	}
+	if tracker.AccessTokenEnv == "" {
+		tracker.AccessTokenEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_ACCESS_TOKEN"
+	}
+	return tracker
 }
 
 func migrateLegacyMediaManager(cfg *MediaManagerConfig, hasNewSetting bool) {
@@ -577,28 +580,9 @@ path = %s
 }
 
 func trackerForSave(cfg *Config, name string) TrackerConfig {
-	tracker := cfg.Trackers[name]
-	if name != "anidb" {
+	tracker := trackerWithCredentialDefaults(cfg.Profile, name, cfg.Trackers[name])
+	if name == "anidb" && tracker.SecretSource == "" {
 		tracker.SecretSource = "keyring"
-		tracker.SecretReference = cfg.Profile + "/" + name + "-access-token"
-		tracker.AccessTokenEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_ACCESS_TOKEN"
-	} else if tracker.SecretSource == "" {
-		tracker.SecretSource = "keyring"
-	}
-	if tracker.ClientSecretSource == "" {
-		tracker.ClientSecretSource = "keyring"
-	}
-	if tracker.ClientSecretReference == "" {
-		tracker.ClientSecretReference = cfg.Profile + "/" + name + "-client-secret"
-	}
-	if tracker.ClientSecretEnv == "" {
-		tracker.ClientSecretEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_CLIENT_SECRET"
-	}
-	if tracker.SecretReference == "" {
-		tracker.SecretReference = cfg.Profile + "/" + name + "-access-token"
-	}
-	if tracker.AccessTokenEnv == "" {
-		tracker.AccessTokenEnv = "VLC_MEDIA_WATCHER_" + strings.ToUpper(name) + "_ACCESS_TOKEN"
 	}
 	return tracker
 }
