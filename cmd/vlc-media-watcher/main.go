@@ -348,6 +348,10 @@ func runWatchContextWithDependencies(ctx context.Context, args []string, stdout 
 	lastPollError := ""
 	for {
 		if err := poll(false); err != nil {
+			if ctx.Err() != nil {
+				serviceLogger.info(time.Now(), "Watcher stopped.")
+				return nil
+			}
 			lastPollError = err.Error()
 			serviceLogger.warning(time.Now(), lastPollError)
 		} else if lastPollError != "" {

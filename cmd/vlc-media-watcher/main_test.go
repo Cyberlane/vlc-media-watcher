@@ -404,7 +404,14 @@ func TestRunWatchKeepsDisabledManagersEntirelyLocal(t *testing.T) {
 
 func TestContinuousWatchIsSingleInstancePrivateAndGraceful(t *testing.T) {
 	polled := make(chan struct{}, 4)
-	vlcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	secondPoll := make(chan struct{}, 1)
+	var polls atomic.Int32
+	vlcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if polls.Add(1) > 1 {
+			secondPoll <- struct{}{}
+			<-r.Context().Done()
+			return
+		}
 		select {
 		case polled <- struct{}{}:
 		default:
@@ -446,6 +453,12 @@ func TestContinuousWatchIsSingleInstancePrivateAndGraceful(t *testing.T) {
 		cancel()
 		t.Fatalf("second watcher error = %v", secondErr)
 	}
+	select {
+	case <-secondPoll:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("continuous watcher did not start a second poll")
+	}
 	cancel()
 	select {
 	case err := <-firstDone:
@@ -457,7 +470,7 @@ func TestContinuousWatchIsSingleInstancePrivateAndGraceful(t *testing.T) {
 	}
 
 	logOutput := output.String()
-	if !strings.Contains(logOutput, "INFO Watching VLC") || !strings.Contains(logOutput, "Secret.Show.S01E01.mkv") || strings.Contains(logOutput, "/Users/example/Private") || !strings.Contains(logOutput, "Watcher stopped") {
+	if !strings.Contains(logOutput, "INFO Watching VLC") || !strings.Contains(logOutput, "Secret.Show.S01E01.mkv") || strings.Contains(logOutput, "/Users/example/Private") || strings.Contains(logOutput, "VLC connection failed") || !strings.Contains(logOutput, "Watcher stopped") {
 		t.Fatalf("service log output = %q", logOutput)
 	}
 
