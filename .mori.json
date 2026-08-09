@@ -1,0 +1,13 @@
+{
+  "profile": "review",
+  "threshold": 0.85,
+  "min_tokens": 40,
+  "max_groups": 250,
+  "max_occurrences": 10,
+  "comparison_domain": "code",
+  "ranking": "review",
+  "same_language_only": true,
+  "cross_language_only": false,
+  "require_coverage": true,
+  "exclude_generated": true
+}

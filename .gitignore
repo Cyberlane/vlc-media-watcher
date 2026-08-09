@@ -20,3 +20,9 @@ coverage.out
 # A global ignore rule may hide this dependency's license directory.
 !third_party_licenses/modernc.org/memory/
 !third_party_licenses/modernc.org/memory/**
+
+# Commit the project-local Mori Agent Skill despite the global .agents ignore.
+!.agents/
+!.agents/skills/
+!.agents/skills/mori-review-similarity/
+!.agents/skills/mori-review-similarity/**

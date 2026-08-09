@@ -1,0 +1,2 @@
+# Routine production review excludes test fixtures.
+**/*_test.go
