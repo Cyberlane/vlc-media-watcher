@@ -90,6 +90,45 @@ func TestCredentialFailurePausesOnlyTheAffectedManager(t *testing.T) {
 	assertClientCalls(t, environment.clients[arr.ManagerRadarr], 0, 1, 1)
 }
 
+func TestProcessRetriesAfterManagerCredentialProviderRecovers(t *testing.T) {
+	cfg := testConfig()
+	cfg.Sonarr.UpdateMonitored = true
+	cfg.Radarr = config.MediaManagerConfig{}
+	environment := newFakeEnvironment()
+	environment.clients[arr.ManagerSonarr].match = exactMatch(arr.ManagerSonarr, true)
+	environment.clients[arr.ManagerSonarr].found = true
+
+	resolveCalls := 0
+	dependencies := environment.dependencies()
+	dependencies.resolveManagerCredential = func(_ context.Context, manager arr.Manager, _ config.MediaManagerConfig) credentials.Resolution {
+		if manager != arr.ManagerSonarr {
+			t.Fatalf("resolved unexpected manager %q", manager)
+		}
+		resolveCalls++
+		if resolveCalls == 1 {
+			return credentials.Resolution{State: credentials.StateProviderUnavailable, SafeMessage: "Sonarr API-key provider is unavailable."}
+		}
+		return credentials.Resolution{State: credentials.StateReady, Value: "resolved-api-key"}
+	}
+
+	reconciler := newReconciler(context.Background(), cfg, dependencies)
+	if !reconciler.NeedsCredentialRefresh() {
+		t.Fatal("NeedsCredentialRefresh() = false after provider failure")
+	}
+
+	outcome := reconciler.Process(context.Background(), "/media/example.mkv")
+	if outcome.Status != StatusUnmonitored {
+		t.Fatalf("Process() status = %q, want %q (%v)", outcome.Status, StatusUnmonitored, outcome.Messages)
+	}
+	if resolveCalls != 2 {
+		t.Fatalf("credential resolution calls = %d, want initial resolution plus one recovery attempt", resolveCalls)
+	}
+	if reconciler.NeedsCredentialRefresh() {
+		t.Fatal("NeedsCredentialRefresh() = true after recovery")
+	}
+	assertClientCalls(t, environment.clients[arr.ManagerSonarr], 0, 1, 1)
+}
+
 func TestNoMatchesChecksEveryActiveManager(t *testing.T) {
 	cfg := testConfig()
 	cfg.Sonarr.UpdateMonitored = true

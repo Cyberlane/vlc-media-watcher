@@ -9,6 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 - Added the contributor code of conduct, code ownership, repository badges, and
   clearer contribution and platform-support guidance.
 
+## [0.2.1] - 2026-08-15
+
+### Fixed
+
+- Media-manager credentials are re-resolved after a startup-time provider
+  failure, allowing the watcher to recover and reconcile completed playback
+  once the provider is available again.
+- Recovery retries remain bounded and fail closed before any remote write when
+  credentials or an exact monitored match are still unavailable.
+
 ## [0.2.0] - 2026-08-09
 
 ### Added
@@ -32,6 +42,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 - Owner-only local SQLite storage with WAL, migrations, foreign-key checks, and continuous-watcher leasing.
 - Graceful background-service operation, Homebrew packaging, cross-platform archives, checksums, SBOMs, and release attestations.
 
-[Unreleased]: https://github.com/Cyberlane/vlc-media-watcher/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Cyberlane/vlc-media-watcher/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Cyberlane/vlc-media-watcher/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Cyberlane/vlc-media-watcher/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Cyberlane/vlc-media-watcher/releases/tag/v0.1.0

@@ -66,8 +66,10 @@ type managerState struct {
 // manager and surfaced through Problems and Process instead of blocking local
 // watch recording.
 type Reconciler struct {
-	managers       []managerState
-	globalProblems []string
+	managers            []managerState
+	globalProblems      []string
+	dependencies        dependencies
+	sonarrFilenameCache arr.SonarrFilenameCache
 }
 
 // New constructs a reconciler and resolves credentials for enabled managers.
@@ -98,6 +100,7 @@ func (r *Reconciler) SetSonarrFilenameCache(cache arr.SonarrFilenameCache) {
 	if r == nil {
 		return
 	}
+	r.sonarrFilenameCache = cache
 	for _, state := range r.managers {
 		if state.manager != arr.ManagerSonarr {
 			continue
@@ -133,7 +136,7 @@ func newReconciler(ctx context.Context, cfg *config.Config, deps dependencies) *
 }
 
 func newReconcilerForManager(ctx context.Context, cfg *config.Config, deps dependencies, onlyManager arr.Manager) *Reconciler {
-	reconciler := &Reconciler{}
+	reconciler := &Reconciler{dependencies: deps}
 	if cfg == nil {
 		reconciler.globalProblems = append(reconciler.globalProblems, "Media-manager configuration is unavailable.")
 		return reconciler
@@ -197,6 +200,74 @@ func (r *Reconciler) Active() bool {
 	return r != nil && len(r.managers) > 0
 }
 
+// NeedsCredentialRefresh reports whether a typed credential failure may be
+// recoverable without rebuilding the reconciler. Configuration and client
+// construction errors intentionally do not qualify for an automatic retry.
+func (r *Reconciler) NeedsCredentialRefresh() bool {
+	if r == nil {
+		return false
+	}
+	for _, state := range r.managers {
+		if state.credentialState != "" && state.initErr != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// RefreshCredentials re-resolves managers whose typed credential provider
+// failed during setup. It keeps healthy manager clients intact and bounds each
+// non-interactive provider read through the background resolver timeout.
+//
+// The return value reports whether at least one manager became ready. Callers
+// should retry the original operation only when it failed before any remote
+// write was attempted.
+func (r *Reconciler) RefreshCredentials(ctx context.Context) bool {
+	if r == nil || r.dependencies.resolveManagerCredential == nil || r.dependencies.newClient == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	recovered := false
+	for i := range r.managers {
+		state := &r.managers[i]
+		if state.credentialState == "" || state.initErr == nil {
+			continue
+		}
+
+		resolveCtx, cancelResolve := context.WithTimeout(ctx, secrets.BackgroundResolveTimeout)
+		resolution := r.dependencies.resolveManagerCredential(resolveCtx, state.manager, state.config)
+		cancelResolve()
+		if !resolution.Ready() {
+			state.client = nil
+			state.credentialState = resolution.State
+			state.initErr = secrets.SafeResolutionError(resolution)
+			continue
+		}
+
+		client, clientErr := r.dependencies.newClient(state.manager, state.config.Endpoint, resolution.Value)
+		if clientErr != nil {
+			state.client = nil
+			state.credentialState = ""
+			state.initErr = fmt.Errorf("create client: %w", clientErr)
+			continue
+		}
+		if state.manager == arr.ManagerSonarr {
+			if cacheClient, ok := client.(interface{ SetSonarrFilenameCache(arr.SonarrFilenameCache) }); ok {
+				cacheClient.SetSonarrFilenameCache(r.sonarrFilenameCache)
+			}
+		}
+
+		state.client = client
+		state.credentialState = ""
+		state.initErr = nil
+		recovered = true
+	}
+	return recovered
+}
+
 // Problems returns a stable-order copy of initialization problems. The
 // underlying secret resolver is responsible for never including secret values
 // in its errors.
@@ -218,16 +289,27 @@ func (r *Reconciler) Problems() []string {
 }
 
 // Process finds exact matches in every active manager before attempting a
-// write. Any lookup failure or more than one manager match fails closed.
+// write. Any lookup failure or more than one manager match fails closed. If a
+// typed manager credential failed during setup, Process makes one bounded
+// recovery attempt before returning a pre-write failure.
 func (r *Reconciler) Process(ctx context.Context, mediaPath string) Outcome {
+	result, refreshable := r.processOnce(ctx, mediaPath)
+	if !refreshable || !r.NeedsCredentialRefresh() || !r.RefreshCredentials(ctx) {
+		return result
+	}
+	retry, _ := r.processOnce(ctx, mediaPath)
+	return retry
+}
+
+func (r *Reconciler) processOnce(ctx context.Context, mediaPath string) (Outcome, bool) {
 	if r == nil {
-		return outcome(StatusLocal, "Remote monitored-state updates are unavailable; this watch remains local.")
+		return outcome(StatusLocal, "Remote monitored-state updates are unavailable; this watch remains local."), false
 	}
 	if len(r.globalProblems) > 0 {
-		return outcome(StatusFailed, "Media-manager setup is unavailable; no remote monitored-state change was made.")
+		return outcome(StatusFailed, "Media-manager setup is unavailable; no remote monitored-state change was made."), false
 	}
 	if !r.Active() {
-		return outcome(StatusLocal, "Remote monitored-state updates are disabled; this watch remains local.")
+		return outcome(StatusLocal, "Remote monitored-state updates are disabled; this watch remains local."), false
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -248,7 +330,7 @@ func (r *Reconciler) Process(ctx context.Context, mediaPath string) Outcome {
 	}
 	if len(readyManagers) == 0 {
 		messages := append(pausedManagers, "No remote monitored-state change was made.")
-		return Outcome{Status: StatusFailed, Messages: messages}
+		return Outcome{Status: StatusFailed, Messages: messages}, len(pausedManagers) > 0
 	}
 
 	type foundMatch struct {
@@ -281,32 +363,32 @@ func (r *Reconciler) Process(ctx context.Context, mediaPath string) Outcome {
 	}
 
 	if len(lookupFailures) > 0 {
-		return Outcome{Status: StatusFailed, Messages: lookupFailures}
+		return Outcome{Status: StatusFailed, Messages: lookupFailures}, len(pausedManagers) > 0
 	}
 	if len(matches) == 0 && len(pausedManagers) > 0 {
 		messages := append(pausedManagers, "No exact ready media-manager match was found; no remote monitored-state change was made.")
-		return Outcome{Status: StatusFailed, Messages: messages}
+		return Outcome{Status: StatusFailed, Messages: messages}, true
 	}
 	if len(matches) == 0 {
-		return outcome(StatusUnmatched, "No exact Sonarr or Radarr library match was found; no remote monitored-state change was made.")
+		return outcome(StatusUnmatched, "No exact Sonarr or Radarr library match was found; no remote monitored-state change was made."), false
 	}
 	if len(matches) > 1 {
-		return outcome(StatusFailed, "More than one media manager matched this file; no remote monitored-state change was made.")
+		return outcome(StatusFailed, "More than one media manager matched this file; no remote monitored-state change was made."), false
 	}
 
 	matched := matches[0]
 	match := matched.match
 	if !matched.state.config.UnmonitoringEnabled() {
-		return Outcome{Status: StatusLocal, Match: &match, Messages: []string{fmt.Sprintf("Resolved exact %s metadata locally; tracker updates still require confirmed mappings.", managerName(matched.state.manager))}}
+		return Outcome{Status: StatusLocal, Match: &match, Messages: []string{fmt.Sprintf("Resolved exact %s metadata locally; tracker updates still require confirmed mappings.", managerName(matched.state.manager))}}, false
 	}
 	if matched.match.AllMonitored(false) {
-		return Outcome{Status: StatusAlreadyUnmonitored, Match: &match, Messages: []string{fmt.Sprintf("The matched %s item is already unmonitored.", managerName(matched.state.manager))}}
+		return Outcome{Status: StatusAlreadyUnmonitored, Match: &match, Messages: []string{fmt.Sprintf("The matched %s item is already unmonitored.", managerName(matched.state.manager))}}, false
 	}
 
 	if err := matched.state.client.SetMonitored(ctx, matched.match, false); err != nil {
-		return outcome(StatusFailed, fmt.Sprintf("%s matched the file, but its monitored state could not be updated; no remote change was confirmed.", managerName(matched.state.manager)))
+		return outcome(StatusFailed, fmt.Sprintf("%s matched the file, but its monitored state could not be updated; no remote change was confirmed.", managerName(matched.state.manager))), false
 	}
-	return Outcome{Status: StatusUnmonitored, Match: &match, Messages: []string{fmt.Sprintf("The matched %s item was set to unmonitored.", managerName(matched.state.manager))}}
+	return Outcome{Status: StatusUnmonitored, Match: &match, Messages: []string{fmt.Sprintf("The matched %s item was set to unmonitored.", managerName(matched.state.manager))}}, false
 }
 
 // Resolve performs the exact same fail-closed library lookup as Process but
