@@ -18,6 +18,8 @@ This project follows [Semantic Versioning](https://semver.org/).
   once the provider is available again.
 - Recovery retries remain bounded and fail closed before any remote write when
   credentials or an exact monitored match are still unavailable.
+- Pinned the release toolchain to Go 1.26.6 for the latest standard-library
+  security fixes.
 
 ## [0.2.0] - 2026-08-09
 
