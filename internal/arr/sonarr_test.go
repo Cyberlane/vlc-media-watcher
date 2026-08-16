@@ -302,6 +302,40 @@ func TestSonarrFindUsesParsedBareFilenameWithoutLibraryScan(t *testing.T) {
 	}
 }
 
+func TestSonarrFindSkipsMovieShapedBareFilename(t *testing.T) {
+	t.Parallel()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.URL.Path {
+		case "/api/v3/system/status":
+			t.Errorf("system status request should not be made for a movie-shaped filename")
+			http.Error(w, "unexpected system status request", http.StatusInternalServerError)
+		case "/api/v3/parse":
+			t.Errorf("parse request = %s, movie-shaped filename should be a clean Sonarr no-match", r.URL.RawQuery)
+			http.Error(w, "unexpected parse request", http.StatusInternalServerError)
+		case "/api/v3/series":
+			t.Errorf("series request = %s, movie-shaped filename should not scan Sonarr", r.URL.Path)
+			http.Error(w, "unexpected library scan", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewSonarrClient(server.URL, "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	match, found, err := client.Find(context.Background(), "Minions & Monsters (2026) WEBDL-2160p Proper.mkv", nil)
+	if err != nil || found || !reflect.DeepEqual(match, Match{}) {
+		t.Fatalf("found=%t match=%#v error=%v", found, match, err)
+	}
+	if requests != 0 {
+		t.Fatalf("movie lookup requests = %d, want zero", requests)
+	}
+}
+
 func TestSonarrFindUsesAndRefreshesFilenameCache(t *testing.T) {
 	t.Parallel()
 	cache := &fakeSonarrFilenameCache{entry: SonarrFilenameCacheEntry{EpisodeFileID: 8, SeriesID: 7, Title: "Show"}, found: true}
