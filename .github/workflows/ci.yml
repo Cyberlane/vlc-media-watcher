@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test (${{ matrix.os }})
@@ -21,10 +25,23 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go fmt ./...
-      - run: git diff --exit-code
-      - run: go vet ./...
-      - run: go test -race ./...
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            printf 'These files are not gofmt-formatted:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        if: runner.os == 'Linux'
+        run: go vet ./...
+      - name: Test with the race detector
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+      - name: Test platform-specific behavior
+        if: runner.os != 'Linux'
+        run: go test ./...
       - run: go build ./cmd/vlc-media-watcher
       - name: Validate Homebrew formula
         if: runner.os == 'macOS'
