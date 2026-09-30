@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+
+	"github.com/Cyberlane/vlc-media-watcher/internal/mediaparse"
 )
 
 // maxBareFilenameLookups bounds the library scan used only when VLC exposes
@@ -102,6 +104,15 @@ type sonarrParseResult struct {
 // file may yield multiple episode Targets. No match returns found=false and a
 // nil error; duplicate exact paths return ErrAmbiguousMatch.
 func (c *SonarrClient) Find(ctx context.Context, localMediaPath string, mapping *PathMapping) (Match, bool, error) {
+	if isBareFilename(localMediaPath) && mediaparse.Parse(localMediaPath).Kind == mediaparse.KindMovie {
+		// A movie-shaped basename cannot identify a Sonarr episode. Treat it as
+		// a clean no-match before contacting Sonarr so the Radarr lookup can
+		// proceed without scanning or depending on the TV manager. This is only
+		// a manager-routing hint; Radarr must still verify the exact movie file
+		// before any write.
+		return Match{}, false, nil
+	}
+
 	instance, err := c.Check(ctx)
 	if err != nil {
 		return Match{}, false, err
