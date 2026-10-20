@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mori_version": "v0.35.0",
+  "embedded_skill": {
+    "revision": "v0.35.0",
+    "digest": "2c94a2c0a06e0c15183100ac66f6183d1b5728311cf287c05aca814f2e9e24c7"
+  },
+  "hook_contract": {
+    "revision": "mori-hook-pre-commit/v2",
+    "digest": "8767b5f76ad73534abfe0f41ec06909b994d2b2b3b059c55306b6e673c7a3855"
+  },
+  "config_schema_version": 3,
+  "report_schema_version": 23,
+  "review_receipt_schema_version": 2,
+  "baseline_schema_version": 4,
+  "normalization_version": 14
+}
